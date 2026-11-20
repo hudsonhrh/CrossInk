@@ -829,9 +829,9 @@ void HomeActivity::onEnter() {
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int swapCount = isDashboardTheme() ? DASHBOARD_RECENT_COUNT : HOME_BOOK_SWAP_RECENT_COUNT;
-  const int recentBooksToLoad =
-      coverGridUi ? CoverGridHomeUi::MAX_BOOKS
-                  : std::min(kMaxCachedBooks, std::max(metrics.homeRecentBooksCount, swapCount));
+  const int recentBooksToLoad = coverGridUi
+                                    ? CoverGridHomeUi::MAX_BOOKS
+                                    : std::min(kMaxCachedBooks, std::max(metrics.homeRecentBooksCount, swapCount));
   RECENT_BOOKS.ensureLoaded();
   loadRecentBooks(recentBooksToLoad);
   gridHasContinueReading = !recentBooks.empty();
