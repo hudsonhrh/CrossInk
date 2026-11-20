@@ -155,6 +155,29 @@ TEST_F(SectionPersistenceTest, FullCommitReopensAndResolvesMetadataAcrossAChunkB
   EXPECT_NE(reopened.loadPage(64), nullptr);
 }
 
+TEST_F(SectionPersistenceTest, CachedPositionLookupsKeepTheFirstMatchAcrossBatches) {
+  SectionHarness harness;
+  harness.begin();
+  for (uint16_t page = 0; page < 67; ++page) {
+    ASSERT_EQ(harness.section.build_->pageIndex.prepareAppend(), SectionPageIndex::PrepareResult::Ready);
+    const auto offset = harness.section.onPageComplete(std::make_unique<Page>());
+    // The first occurrence of 70 is at the end of a batch. Later entries
+    // repeat it and then decrease. Missing targets still fall back to page 66.
+    const uint16_t index = page == 31 || page == 32 ? 70 : page;
+    harness.section.build_->pageIndex.appendPrepared({offset, index, index, page});
+  }
+  ASSERT_TRUE(harness.commit(kFullVersion));
+  harness.finishSuccessfulCommit();
+  Section reopened(harness.epub, 0, harness.renderer);
+  ASSERT_TRUE(reopened.loadSectionFile(harness.spec));
+  const auto before = Storage.reads(reopened.filePath);
+  EXPECT_EQ(reopened.getPageForParagraphIndex(70), 31);
+  EXPECT_EQ(reopened.getPageForListItemIndex(70), 31);
+  EXPECT_EQ(reopened.getPageForParagraphIndex(71), 66);
+  EXPECT_EQ(reopened.getPageForListItemIndex(71), 66);
+  EXPECT_LE(Storage.reads(reopened.filePath) - before, 20u);
+}
+
 TEST_F(SectionPersistenceTest, PartialCommitFiltersFutureAnchorsAndFallsBackBeyondTheLivePrefix) {
   SectionHarness harness;
   harness.begin({{"chapter", 0}, {"boundary", 64}, {"future", 65}});

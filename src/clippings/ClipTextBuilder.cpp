@@ -13,33 +13,31 @@ namespace {
 
 bool hasEmSpace(const char* word) { return word[0] == '\xe2' && word[1] == '\x80' && word[2] == '\x83'; }
 
-struct CleanWord {
-  std::string text;
-  bool leadingSpace = false;
-  bool trailingSpace = false;
-};
+size_t spaceLength(const std::string_view word, size_t i) {
+  const char c = word[i];
+  if (c == ' ' || c == '\r' || c == '\n' || c == '\t') return 1;
+  return clippingPreview::utf8SpaceLength(word.data() + i, word.size() - i);
+}
 
-CleanWord cleanWordText(std::string_view word) {
-  CleanWord result;
-  auto& text = result.text;
-  text.reserve(word.size());
+// The caller has removed leading whitespace. Copy ordinary UTF-8 in runs
+// directly into the reserved clipping, retaining repeated authored ASCII spaces.
+bool appendWordText(std::string& text, const std::string_view word) {
+  size_t runStart = 0;
   for (size_t i = 0; i < word.size();) {
-    const char c = word[i];
-    const size_t utf8Space = clippingPreview::utf8SpaceLength(word.data() + i, word.size() - i);
-    if (utf8Space || c == ' ' || c == '\r' || c == '\n' || c == '\t') {
-      if (text.empty()) {
-        result.leadingSpace = true;
-      } else if (c == ' ' || text.back() != ' ') {
-        text += ' ';
-      }
-      i += utf8Space ? utf8Space : 1;
-    } else {
-      text += word[i++];
+    const size_t length = spaceLength(word, i);
+    if (length == 0) {
+      ++i;
+      continue;
     }
+    text.append(word.data() + runStart, i - runStart);
+    if (word[i] == ' ' || text.back() != ' ') text += ' ';
+    i += length;
+    runStart = i;
   }
-  result.trailingSpace = !text.empty() && text.back() == ' ';
-  while (!text.empty() && text.back() == ' ') text.pop_back();
-  return result;
+  text.append(word.data() + runStart, word.size() - runStart);
+  const bool trailingSpace = text.back() == ' ';
+  while (text.back() == ' ') text.pop_back();
+  return trailingSpace;
 }
 
 bool attachedInReadingOrder(const WordRef& previous, const WordRef& word) {
@@ -106,16 +104,12 @@ bool isSelectedTableWord(const WordRef& word, const uint16_t tableSelection) {
 AllocationBudget allocationBudget(const ClipWordStore& wordStore, const uint16_t* wordOrder, const int fromOrder,
                                   const int toOrder, const uint16_t tableSelection) {
   AllocationBudget budget;
-  size_t longestWord = 0;
   for (int i = fromOrder; i <= toOrder; ++i) {
     const auto& word = wordStore.words[wordOrder[i]];
     if (!isSelectedTableWord(word, tableSelection)) continue;
     // Cleaning only removes bytes; allow one separator per selected word.
     budget.textCapacity += word.textLength + 1U;
-    longestWord = std::max(longestWord, static_cast<size_t>(word.textLength));
   }
-  // Keep conservative headroom for temporary strings during assembly.
-  budget.temporaryBytes = 4 * (longestWord + 1U);
   return budget;
 }
 
@@ -165,9 +159,16 @@ ClippingResult build(const ClipWordStore& wordStore, const uint16_t* wordOrder, 
   for (int orderIdx = fromOrder; orderIdx <= toOrder; ++orderIdx) {
     const WordRef& word = words[wordOrder[orderIdx]];
     if (!isSelectedTableWord(word, tableSelection)) continue;
-    auto clean = cleanWordText(selectedWordText(wordStore, word, selectionBounds));
-    if (clean.text.empty()) {
-      previousTrailingSpace |= clean.leadingSpace;
+    auto selected = selectedWordText(wordStore, word, selectionBounds);
+    size_t leadingBytes = 0;
+    while (leadingBytes < selected.size()) {
+      const size_t length = spaceLength(selected, leadingBytes);
+      if (length == 0) break;
+      leadingBytes += length;
+    }
+    selected.remove_prefix(leadingBytes);
+    if (selected.empty()) {
+      previousTrailingSpace |= leadingBytes != 0;
       continue;
     }
 
@@ -183,18 +184,18 @@ ClippingResult build(const ClipWordStore& wordStore, const uint16_t* wordOrder, 
                                    (previousWord->pageIdx != word.pageIdx || previousWord->y != word.y) &&
                                    (previousWord->sourceEnd == UINT32_MAX || word.sourceStart == UINT32_MAX ||
                                     previousWord->sourceEnd == word.sourceStart) &&
-                                   !std::ispunct(static_cast<unsigned char>(clean.text.front()));
-        if (previousTrailingSpace || clean.leadingSpace ||
+                                   !std::ispunct(static_cast<unsigned char>(selected.front()));
+        if (previousTrailingSpace || leadingBytes != 0 ||
             (!wrappedHyphen && !attachedInReadingOrder(*previousWord, word))) {
           text += ' ';
         }
       }
     }
-    previousInsertedHyphen = word.endsWithInsertedHyphen && clean.text.back() == '-';
-    if (previousInsertedHyphen) clean.text.pop_back();
-    text += clean.text;
+    previousTrailingSpace = appendWordText(text, selected);
+    const bool includesWordEnd = selected.data() + selected.size() == wordStore.text(word) + word.textLength;
+    previousInsertedHyphen = word.endsWithInsertedHyphen && includesWordEnd && text.back() == '-';
+    if (previousInsertedHyphen) text.pop_back();
     previousWord = &word;
-    previousTrailingSpace = clean.trailingSpace;
   }
 
   ClippingResult result{std::move(text),
