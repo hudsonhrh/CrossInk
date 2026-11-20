@@ -5258,6 +5258,7 @@ void EpubReaderActivity::startClipSelection(const DictionaryClippingRequest* dic
         if (textPoolFull) return false;
         const auto& block = *line.block;
         const uint16_t count = block.wordCount();
+        uint16_t previousBlockIndex = UINT16_MAX;
         for (uint16_t i = 0; i < count; ++i) {
           const char* wordText = block.wordText(i);
           if (!hasVisibleWordText(wordText)) continue;
@@ -5299,6 +5300,13 @@ void EpubReaderActivity::startClipSelection(const DictionaryClippingRequest* dic
           word.style = textStyle;
           word.endsWithInsertedHyphen = block.wordEndsWithInsertedHyphen(i);
           word.lineIsRtl = block.getBlockStyle().isRtl;
+          // A skipped token can itself be the space (e.g. an EPUB nonbreaking space).
+          if (previousBlockIndex + 1 == i && !block.wordHasSpaceBefore(i)) {
+            // Publishers can also use CSS inline padding as a visible separator.
+            const auto& previous = wordStore.words.back();
+            word.attachedToPrevious = word.x <= previous.x + previous.w + 2 && previous.x <= word.x + word.w + 2;
+          }
+          previousBlockIndex = i;
           wordStore.words.push_back(word);
         }
         return !textPoolFull && wordStore.words.size() < maxSelectableWords;

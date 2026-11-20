@@ -13,7 +13,7 @@ struct WordRef {
   int y = 0;
   int w = 0;
   int h = 0;
-  int pageIdx = 0;
+  uint8_t pageIdx = 0;  // Offset within the three-page selection window.
   uint16_t pageWordIndex = 0;
   uint16_t textOffset = 0;
   uint16_t textLength = 0;
@@ -22,6 +22,7 @@ struct WordRef {
   bool paragraphStart = false;
   bool endsWithInsertedHyphen = false;
   bool lineIsRtl = false;
+  bool attachedToPrevious = false;  // Previous selectable word in block (visual) order.
   uint32_t sourceStart = UINT32_MAX;
   uint32_t sourceEnd = UINT32_MAX;
 };

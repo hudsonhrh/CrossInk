@@ -400,6 +400,18 @@ def run_smoke(args: argparse.Namespace) -> int:
             env["CROSSINK_SIMULATOR_SMOKE_STATUS_BAR_CAPTURES"] = str(Path(args.status_bar_captures).resolve())
         if args.clipping_selection:
             env["CROSSINK_SIMULATOR_SMOKE_CLIPPING_SELECTION"] = "1"
+            # Keep the gesture fixture intact. The spacing check opens a second
+            # book with a single known passage and no optimizer pass.
+            with zipfile.ZipFile(DEFAULT_BOOK) as source, zipfile.ZipFile(
+                temp_root / "fs_" / "clipping-spacing.epub", "w"
+            ) as destination:
+                for entry in source.infolist():
+                    data = source.read(entry)
+                    if entry.filename == "OEBPS/chapter1.xhtml":
+                        body = ("<body><p>assumptions about societies&#160;work "
+                                "leverag<em>ing</em> options master’s&#8239;tools</p></body>")
+                        data = re.sub(b"<body>.*?</body>", body.encode(), data, flags=re.S)
+                    destination.writestr(entry, data)
         if args.dictionary or args.clipping_selection:
             dictionary = temp_root / "fs_" / "dictionary-smoke"
             dictionary.mkdir()

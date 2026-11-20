@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string_view>
 #include <tuple>
 
@@ -740,6 +742,46 @@ bool ClippingSelectionSmokeTest::tick() {
         break;
       }
       require(CLIPPINGS.clippingCount() == initialCount + 2, "Other actions unexpectedly saved a clipping");
+      activityManager.goHome();
+      stage = 80;
+      break;
+    }
+    case 80:
+      require(activityManager.isHomeActivity(), "Could not leave the gesture fixture");
+      SETTINGS.wordSpacing = WordSpacing::fromLevel(-4);
+      SETTINGS.paragraphAlignment = CrossPointSettings::LEFT_ALIGN;
+      activityManager.goToReader("/clipping-spacing.epub", true);
+      break;
+    case 81:
+      if (!reader || !reader->section || !reader->section->pageCount) {
+        --stage;
+        break;
+      }
+      reader->openWordSelect(false);
+      break;
+    case 82: {
+      require(selection, "Could not select the spacing fixture");
+      int last = 0;
+      while (selection->navigator.getWordAt(last + 1)) ++last;
+      selection->navigator.setTouchSelection(0, last);
+      require(selection->captureClippingRequest(), "Could not select the complete spacing passage");
+      selection->finishWithClippingRequest();
+      break;
+    }
+    case 83: {
+      if (!reader) {
+        --stage;
+        break;
+      }
+      std::string text;
+      require(CLIPPINGS.clippingCount() == 1 && CLIPPINGS.readClippingText(0, text), "Missing saved spacing passage");
+      LOG_INF("SMOKE", "Saved spacing passage: %s", text.c_str());
+      require(text == "assumptions about societies work leveraging options master’s tools",
+              "Saved clipping differs from the authored passage");
+      std::ifstream file("fs_/My Clippings.txt");
+      const std::string exported{std::istreambuf_iterator<char>(file), {}};
+      require(exported.find("\n\n" + text + "\n==========\n") != std::string::npos,
+              "Clipping export differs from the authored passage");
       return true;
     }
   }
