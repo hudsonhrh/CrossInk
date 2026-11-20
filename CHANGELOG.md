@@ -2,7 +2,7 @@
 
 ### Added
 
-- On X4 Pro, the Dashboard shows the last 30 days of reading time and your current streak. Tap the grid or open the last page of Reading Stats to explore daily reading over 30 days and six months. The shading extends to a three-hour top bracket for frequent long readers. Turn off **Show Reading Heatmap** in Reading Stats settings to restore the original Dashboard footer.
+- On X4 Pro, the Dashboard shows the last 30 days of reading time and your current streak. Tap the grid or open the last page of Reading Stats to explore the last 30 days and a six-month calendar. Weeks run down two columns so individual days are easier to see on the e-ink screen. The shading extends to a three-hour top bracket for frequent long readers. Turn off **Show Reading Heatmap** in Reading Stats settings to restore the original Dashboard footer.
 - Mark an EPUB as a short read from the Library, File Browser, or reader Settings. Reading Stats shows Books Read until you mark your first short read, then shows both completion counts. Choose Articles in Reading Stats settings if you prefer that label.
 - Support BOOX Picco and EEGO Reader A4 with touch, frontlight controls, and USB Drive support. Picco also supports its slide switch and tilt page turns.
 - Connect a reader to a computer running a compatible version of Inky to sync reading progress over USB. Reading stats and clippings can also sync using the computer’s internet connection.
