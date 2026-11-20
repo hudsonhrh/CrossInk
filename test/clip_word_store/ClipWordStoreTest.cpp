@@ -90,6 +90,98 @@ TEST(ClipSelectionPaging, AllowsOnlySmallPageEndDwellTouchJitter) {
   EXPECT_FALSE(ClipSelectionPaging::isWithinPageEndDwellSlop(word, 120, 218));
 }
 
+TEST(ClipTextBuilder, PreservesSpacesWhenSelectionBoxesNearlyTouchOrOverlap) {
+  ClipWordStore store;
+  const char* texts[] = {"assumptions", "about", "societies", "work"};
+  const int xs[] = {0, 22, 42, 60};  // Two-pixel gap, touching, then overlap.
+  const uint16_t order[] = {0, 1, 2, 3};
+  for (uint16_t i : order) {
+    WordRef word;
+    word.pageWordIndex = i;
+    word.x = xs[i];
+    word.w = 20;
+    ASSERT_TRUE(store.appendText(word, texts[i]));
+    store.words.push_back(word);
+  }
+
+  EXPECT_EQ(ClipTextBuilder::build(store, order, 0, 3, 0, 1).text, "assumptions about societies work");
+}
+
+TEST(ClipTextBuilder, UsesTheBoundaryBetweenAdjacentFragmentsInEitherReadingDirection) {
+  ClipWordStore store;
+  const char* texts[] = {"בת", "של", "אב"};
+  const uint16_t forward[] = {0, 1, 2};
+  const uint16_t reverse[] = {2, 1, 0};
+  for (uint16_t i : forward) {
+    WordRef word;
+    word.pageWordIndex = i;
+    word.x = 10 * i;
+    word.w = 10;
+    word.attachedToPrevious = i == 1;
+    word.style = i == 1 ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR;
+    ASSERT_TRUE(store.appendText(word, texts[i]));
+    store.words.push_back(word);
+  }
+
+  EXPECT_EQ(ClipTextBuilder::build(store, forward, 0, 2, 0, 1).text, "בתשל אב");
+  EXPECT_EQ(ClipTextBuilder::build(store, reverse, 0, 2, 0, 1).text, "אב שלבת");
+}
+
+TEST(ClipTextBuilder, NormalizesNonBreakingSpacesAtTheEdgesOfAttachedFragments) {
+  ClipWordStore store;
+  // HTML inline styling can leave the authored space inside either token.
+  const char* texts[] = {"one\u00a0", "two", "\u202fthree\u00a0", "\u00a0four"};
+  const uint16_t order[] = {0, 1, 2, 3};
+  for (uint16_t i : order) {
+    WordRef word;
+    word.pageWordIndex = i;
+    word.attachedToPrevious = i != 0;
+    ASSERT_TRUE(store.appendText(word, texts[i]));
+    store.words.push_back(word);
+  }
+
+  EXPECT_EQ(ClipTextBuilder::build(store, order, 0, 3, 0, 1).text, "one two three four");
+}
+
+TEST(ClipTextBuilder, PreservesAuthoredHyphenAndItsFollowingSpace) {
+  ClipWordStore store;
+  WordRef first;
+  ASSERT_TRUE(store.appendText(first, "short-"));
+  store.words.push_back(first);
+
+  WordRef second;
+  second.pageWordIndex = 1;
+  ASSERT_TRUE(store.appendText(second, "term"));
+  store.words.push_back(second);
+  const uint16_t order[] = {0, 1};
+
+  EXPECT_EQ(ClipTextBuilder::build(store, order, 0, 1, 0, 1).text, "short- term");
+  store.words[1].attachedToPrevious = true;
+  EXPECT_EQ(ClipTextBuilder::build(store, order, 0, 1, 0, 1).text, "short-term");
+}
+
+TEST(ClipTextBuilder, DistinguishesAWrappedHyphenatedWordFromAWordEndingWithAHyphen) {
+  ClipWordStore store;
+  WordRef first;
+  first.sourceStart = 5;
+  first.sourceEnd = 11;
+  ASSERT_TRUE(store.appendText(first, "short-"));
+  store.words.push_back(first);
+
+  WordRef second;
+  second.pageIdx = 1;
+  second.sourceStart = first.sourceEnd;
+  second.sourceEnd = second.sourceStart + 4;
+  ASSERT_TRUE(store.appendText(second, "term"));
+  store.words.push_back(second);
+  const uint16_t order[] = {0, 1};
+
+  EXPECT_EQ(ClipTextBuilder::build(store, order, 0, 1, 0, 2).text, "short-term");
+  ++store.words[1].sourceStart;
+  ++store.words[1].sourceEnd;
+  EXPECT_EQ(ClipTextBuilder::build(store, order, 0, 1, 0, 2).text, "short- term");
+}
+
 TEST(ClipTextBuilder, JoinsInsertedHyphenAcrossParagraphBoundary) {
   ClipWordStore store;
   WordRef prefix;

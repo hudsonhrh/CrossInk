@@ -4,90 +4,66 @@
 
 #include <algorithm>
 #include <cctype>
+#include <string_view>
+
+#include "ClippingPreview.h"
 
 namespace ClipTextBuilder {
 namespace {
 
 bool hasEmSpace(const char* word) { return word[0] == '\xe2' && word[1] == '\x80' && word[2] == '\x83'; }
 
-bool isUtf8SpaceAt(const std::string& text, const size_t index, size_t& advance) {
-  const auto c = static_cast<unsigned char>(text[index]);
-  if (c == 0xC2 && index + 1 < text.size() && static_cast<unsigned char>(text[index + 1]) == 0xA0) {
-    advance = 2;
-    return true;
-  }
-  if (c == 0xE2 && index + 2 < text.size() && static_cast<unsigned char>(text[index + 1]) == 0x80) {
-    const auto c2 = static_cast<unsigned char>(text[index + 2]);
-    if (c2 == 0x83 || c2 == 0xAF) {
-      advance = 3;
-      return true;
-    }
-  }
-  return false;
-}
+struct CleanWord {
+  std::string text;
+  bool leadingSpace = false;
+  bool trailingSpace = false;
+};
 
-std::string cleanWordText(const std::string& word) {
-  std::string out;
-  out.reserve(word.size());
+CleanWord cleanWordText(std::string_view word) {
+  CleanWord result;
+  auto& text = result.text;
+  text.reserve(word.size());
   for (size_t i = 0; i < word.size();) {
-    size_t advance = 0;
-    if (isUtf8SpaceAt(word, i, advance)) {
-      if (!out.empty() && out.back() != ' ') {
-        out += ' ';
+    const char c = word[i];
+    const size_t utf8Space = clippingPreview::utf8SpaceLength(word.data() + i, word.size() - i);
+    if (utf8Space || c == ' ' || c == '\r' || c == '\n' || c == '\t') {
+      if (text.empty()) {
+        result.leadingSpace = true;
+      } else if (c == ' ' || text.back() != ' ') {
+        text += ' ';
       }
-      i += advance;
-      continue;
+      i += utf8Space ? utf8Space : 1;
+    } else {
+      text += word[i++];
     }
-    const char c = word[i++];
-    if (c == '\r' || c == '\n' || c == '\t') {
-      if (!out.empty() && out.back() != ' ') {
-        out += ' ';
-      }
-      continue;
-    }
-    out += c;
   }
-
-  while (!out.empty() && out.front() == ' ') {
-    out.erase(out.begin());
-  }
-  while (!out.empty() && out.back() == ' ') {
-    out.pop_back();
-  }
-  return out;
+  result.trailingSpace = !text.empty() && text.back() == ' ';
+  while (!text.empty() && text.back() == ' ') text.pop_back();
+  return result;
 }
 
-std::string stripTrailingInsertedHyphen(std::string word, const bool insertedHyphen) {
-  if (insertedHyphen && !word.empty() && word.back() == '-') {
-    word.pop_back();
-  }
-  return word;
+bool attachedInReadingOrder(const WordRef& previous, const WordRef& word) {
+  if (previous.pageIdx != word.pageIdx) return false;
+  // RTL selection visits the same block boundaries in reverse order.
+  if (previous.pageWordIndex + 1 == word.pageWordIndex) return word.attachedToPrevious;
+  return word.pageWordIndex + 1 == previous.pageWordIndex && previous.attachedToPrevious;
 }
 
-bool areWordsVisuallyAttached(const WordRef& previousWord, const WordRef& word) {
-  if (word.pageIdx != previousWord.pageIdx || word.y != previousWord.y) return false;
-
-  if (word.x >= previousWord.x) {
-    return word.x <= previousWord.x + previousWord.w + 2;
-  }
-  return previousWord.x <= word.x + word.w + 2;
-}
-
-std::string selectedWordText(const ClipWordStore& wordStore, const WordRef& word,
-                             const SelectionBounds* selectionBounds) {
+std::string_view selectedWordText(const ClipWordStore& wordStore, const WordRef& word,
+                                  const SelectionBounds* selectionBounds) {
   const bool isFirstBound = selectionBounds && word.pageIdx == selectionBounds->firstPageIdx &&
                             word.pageWordIndex == selectionBounds->firstPageWordOrdinal;
   const bool isLastBound = selectionBounds && word.pageIdx == selectionBounds->lastPageIdx &&
                            word.pageWordIndex == selectionBounds->lastPageWordOrdinal;
   if (!selectionBounds || (!isFirstBound && !isLastBound)) {
-    return cleanWordText(wordStore.text(word));
+    return {wordStore.text(word), word.textLength};
   }
 
   const size_t textLength = word.textLength;
   const size_t begin = isFirstBound ? std::min<size_t>(selectionBounds->firstWordByteOffset, textLength) : 0;
   const size_t end = isLastBound ? std::min<size_t>(selectionBounds->lastWordByteEndOffset, textLength) : textLength;
   if (end < begin) return {};
-  return cleanWordText(std::string(wordStore.text(word) + begin, end - begin));
+  return {wordStore.text(word) + begin, end - begin};
 }
 
 uint32_t countCharacters(const char* text, const size_t begin, const size_t end) {
@@ -138,7 +114,7 @@ AllocationBudget allocationBudget(const ClipWordStore& wordStore, const uint16_t
     budget.textCapacity += word.textLength + 1U;
     longestWord = std::max(longestWord, static_cast<size_t>(word.textLength));
   }
-  // Original, cleaned, dehyphenated and previous word can overlap during assembly.
+  // Keep conservative headroom for temporary strings during assembly.
   budget.temporaryBytes = 4 * (longestWord + 1U);
   return budget;
 }
@@ -183,54 +159,42 @@ ClippingResult build(const ClipWordStore& wordStore, const uint16_t* wordOrder, 
   }
 
   const WordRef* previousWord = nullptr;
-  std::string previousClean;
+  bool previousInsertedHyphen = false;
+  bool previousTrailingSpace = false;
 
   for (int orderIdx = fromOrder; orderIdx <= toOrder; ++orderIdx) {
     const WordRef& word = words[wordOrder[orderIdx]];
     if (!isSelectedTableWord(word, tableSelection)) continue;
-    const auto cleanText = selectedWordText(wordStore, word, selectionBounds);
-    const auto wordText = stripTrailingInsertedHyphen(cleanText, word.endsWithInsertedHyphen);
-    if (wordText.empty()) {
-      previousWord = &word;
-      previousClean = cleanText;
-      continue;
-    }
-    const bool joinsInsertedHyphen =
-        previousWord && previousWord->endsWithInsertedHyphen && !previousClean.empty() && previousClean.back() == '-';
-    if (joinsInsertedHyphen) {
-      text += wordText;
-      previousWord = &word;
-      previousClean = cleanText;
+    auto clean = cleanWordText(selectedWordText(wordStore, word, selectionBounds));
+    if (clean.text.empty()) {
+      previousTrailingSpace |= clean.leadingSpace;
       continue;
     }
 
-    const bool yGap =
-        previousWord && word.pageIdx == previousWord->pageIdx && word.y > previousWord->y + previousWord->h;
-    const bool paragraphStart = previousWord && (hasEmSpace(wordStore.text(word)) || word.paragraphStart || yGap);
-
-    if (previousWord && !text.empty() && !paragraphStart) {
-      if (!previousClean.empty() && previousClean.back() == '-' &&
-          !std::isspace(static_cast<unsigned char>(wordText[0])) &&
-          !std::ispunct(static_cast<unsigned char>(wordText[0]))) {
-        text += wordText;
-        previousWord = &word;
-        previousClean = cleanText;
-        continue;
+    const bool paragraphStart =
+        previousWord && (hasEmSpace(wordStore.text(word)) || word.paragraphStart ||
+                         (word.pageIdx == previousWord->pageIdx && word.y > previousWord->y + previousWord->h));
+    if (previousWord && !text.empty() && !previousInsertedHyphen) {
+      if (paragraphStart) {
+        text += '\n';
+      } else {
+        // A literal hyphen can also be a legal wrap point inside a compound word.
+        const bool wrappedHyphen = text.back() == '-' &&
+                                   (previousWord->pageIdx != word.pageIdx || previousWord->y != word.y) &&
+                                   (previousWord->sourceEnd == UINT32_MAX || word.sourceStart == UINT32_MAX ||
+                                    previousWord->sourceEnd == word.sourceStart) &&
+                                   !std::ispunct(static_cast<unsigned char>(clean.text.front()));
+        if (previousTrailingSpace || clean.leadingSpace ||
+            (!wrappedHyphen && !attachedInReadingOrder(*previousWord, word))) {
+          text += ' ';
+        }
       }
     }
-
-    if (paragraphStart) {
-      text += '\n';
-    } else if (!text.empty()) {
-      const bool attached = previousWord && areWordsVisuallyAttached(*previousWord, word);
-      if (!attached) {
-        text += ' ';
-      }
-    }
-    text += wordText;
-
+    previousInsertedHyphen = word.endsWithInsertedHyphen && clean.text.back() == '-';
+    if (previousInsertedHyphen) clean.text.pop_back();
+    text += clean.text;
     previousWord = &word;
-    previousClean = cleanText;
+    previousTrailingSpace = clean.trailingSpace;
   }
 
   ClippingResult result{std::move(text),
