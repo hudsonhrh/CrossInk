@@ -68,8 +68,9 @@ Tap an item to open it. Tap outside the panel to close it.
 
 ### Switching recent books
 
-If your reading history has at least two books, swipe left on the Lyra,
-Dashboard, or Minimal Home screen to switch to the other recent book.
+On Dashboard, swipe left to cycle through your three most recent available books.
+After the last one, another left swipe returns to the first. Tap the displayed
+cover to resume that book. Lyra and Minimal cycle through two recent books.
 
 ## Cover Grid Home
 

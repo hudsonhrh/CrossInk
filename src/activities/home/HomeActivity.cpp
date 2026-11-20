@@ -52,6 +52,8 @@ constexpr uint32_t CAROUSEL_FRAME_MIN_FREE_AFTER_ALLOC = 64U * 1024U;
 constexpr uint32_t CAROUSEL_FRAME_MIN_MAX_ALLOC_AFTER_ALLOC = 24U * 1024U;
 constexpr unsigned long HOME_BOOK_SWAP_LONG_PRESS_MS = 1000;
 constexpr int HOME_BOOK_SWAP_RECENT_COUNT = 2;
+constexpr int DASHBOARD_RECENT_COUNT = 3;
+static_assert(DASHBOARD_RECENT_COUNT <= HomeActivity::kMaxCachedBooks);
 
 enum class HomeMenuAction {
   BrowseFiles,
@@ -535,13 +537,12 @@ void HomeActivity::loadRecentBooks(int maxBooks) {
       break;
     }
 
-    RecentBook book = storedBook;
-    if (RecentBooksStore::isMissing(book)) {
+    if (RecentBooksStore::isMissing(storedBook)) {
       continue;
     }
 
-    ensureReusableCoverPath(book);
-    recentBooks.push_back(book);
+    recentBooks.push_back(storedBook);
+    ensureReusableCoverPath(recentBooks.back());
   }
 }
 
@@ -643,13 +644,14 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
   const bool isDashboard = isDashboardTheme();
   const Rect homeCover = isDashboard ? DashboardTheme::getHomeCoverRect(renderer)
                                      : (isMinimal ? MinimalTheme::getHomeCoverRect(renderer) : Rect{});
-  const size_t recentBookCount = recentBooks.size();
+  // Dashboard shows only the front book. Defer the other thumbnails until their first swipe.
+  const size_t recentBookCount = isDashboard ? std::min<size_t>(1, recentBooks.size()) : recentBooks.size();
   // Home only loads kMaxCachedBooks recents; fixed storage avoids an aborting std::vector allocation on low heap.
   std::array<char, kMaxCachedBooks> bookUpdated{};
   const int progressIncrement = 90 / static_cast<int>(std::max<size_t>(1, recentBookCount));
 
   int progress = 0;
-  for (size_t bookIdx = 0; bookIdx < recentBooks.size(); ++bookIdx) {
+  for (size_t bookIdx = 0; bookIdx < recentBookCount; ++bookIdx) {
     RecentBook& book = recentBooks[bookIdx];
     if (!Storage.exists(book.path.c_str())) {
       progress++;
@@ -826,9 +828,10 @@ void HomeActivity::onEnter() {
   carouselWarmupPending = isCarouselTheme;
 
   const auto& metrics = UITheme::getInstance().getMetrics();
+  const int swapCount = isDashboardTheme() ? DASHBOARD_RECENT_COUNT : HOME_BOOK_SWAP_RECENT_COUNT;
   const int recentBooksToLoad =
       coverGridUi ? CoverGridHomeUi::MAX_BOOKS
-                  : std::min(kMaxCachedBooks, std::max(metrics.homeRecentBooksCount, HOME_BOOK_SWAP_RECENT_COUNT));
+                  : std::min(kMaxCachedBooks, std::max(metrics.homeRecentBooksCount, swapCount));
   RECENT_BOOKS.ensureLoaded();
   loadRecentBooks(recentBooksToLoad);
   gridHasContinueReading = !recentBooks.empty();
@@ -937,12 +940,15 @@ void HomeActivity::showNextRecentBookOnHome() {
     return;
   }
 
+  // The render task can still be drawing or generating the previous book's thumbnail.
+  RenderLock lock(*this);
   std::rotate(recentBooks.begin(), recentBooks.begin() + 1, recentBooks.end());
   selectorIndex = 0;
   lastCarouselBookIndex = 0;
+  if (isDashboardTheme()) recentsLoaded = false;
+  invalidateCoverCache();
   bookStatsCached = false;
   updateHighlightedBookContext();
-  invalidateCoverCache();
   requestUpdate();
 }
 
