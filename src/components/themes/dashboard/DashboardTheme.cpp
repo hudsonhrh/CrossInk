@@ -78,7 +78,8 @@ struct DashboardLayout {
 Rect footerForContent(const GfxRenderer& renderer, const Rect& content) {
   const int bottom = content.y + content.height;
 #if CROSSINK_APP_READING_HEATMAP
-  if (SETTINGS.shouldShowReadingHeatmap()) {
+  // The saved layout determines thumbnail dimensions even while tracking is paused.
+  if (SETTINGS.showReadingHeatmap) {
     const int footerH = kHistoryTopPad + renderer.getLineHeight(UI_10_FONT_ID) + renderer.getLineHeight(UI_12_FONT_ID) +
                         renderer.getLineHeight(SMALL_FONT_ID);
     return Rect{content.x, std::max(content.y, bottom - footerH - 8), content.width, footerH};
