@@ -995,7 +995,7 @@ std::unique_ptr<Activity> HomeActivity::createFrontlightReadingStatsActivity() {
 void HomeActivity::onFrontlightPanelOpened() {
   insetsBeforeFrontlightPanel = renderer.getViewableInsets();
   themeBeforeFrontlightPanel = SETTINGS.uiTheme;
-  dashboardHeatmapBeforeFrontlightPanel = isDashboardTheme() && SETTINGS.shouldShowReadingHeatmap();
+  dashboardHeatmapBeforeFrontlightPanel = SETTINGS.showReadingHeatmap;
   scaleBeforeFrontlightPanel = SETTINGS.uiScale;
   filenameFontBeforeFrontlightPanel = filenameFontSystem.fingerprint();
   statusSizeBeforeFrontlightPanel = SETTINGS.displayStatusBarTextSize;
@@ -1005,7 +1005,7 @@ void HomeActivity::onFrontlightPanelOpened() {
 
 void HomeActivity::onFrontlightPanelClosed() {
   if (themeBeforeFrontlightPanel != SETTINGS.uiTheme || scaleBeforeFrontlightPanel != SETTINGS.uiScale ||
-      dashboardHeatmapBeforeFrontlightPanel != (isDashboardTheme() && SETTINGS.shouldShowReadingHeatmap()) ||
+      (isDashboardTheme() && dashboardHeatmapBeforeFrontlightPanel != SETTINGS.showReadingHeatmap) ||
       filenameFontBeforeFrontlightPanel != filenameFontSystem.fingerprint() ||
       statusSizeBeforeFrontlightPanel != SETTINGS.displayStatusBarTextSize ||
       insetsBeforeFrontlightPanel != renderer.getViewableInsets()) {

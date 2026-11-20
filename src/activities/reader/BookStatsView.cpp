@@ -141,7 +141,11 @@ Rect statsSafeArea(const GfxRenderer& renderer, const bool showButtonHints) {
 
 int statsAvailableHeight(const GfxRenderer& renderer, const bool showButtonHints) {
   const auto& metrics = UITheme::getInstance().getMetrics();
+  // With history enabled, stats still has multiple pages when the RTC is unavailable.
+  const bool noRtcPager = CROSSINK_APP_READING_HEATMAP && showButtonHints && !shouldShowRtcBasedStats() &&
+                          SETTINGS.shouldShowReadingHeatmap();
   return statsSafeArea(renderer, showButtonHints).height - metrics.topPadding - metrics.verticalSpacing -
+         (noRtcPager ? kPageIndicatorClearance : 0) -
          (showButtonHints && UITheme::getButtonHintsReserve(renderer) > 0 ? kStatsButtonHintTopGap : 0);
 }
 
