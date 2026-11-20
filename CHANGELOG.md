@@ -2,7 +2,7 @@
 
 ### Added
 
-- Mark an EPUB as an article from the Library, File Browser, or reader Settings. Reading Stats shows Books Read until you mark your first article, then shows both completion counts. Choose Articles or Short Reads as the label in Reading Stats settings.
+- Mark an EPUB as a short read from the Library, File Browser, or reader Settings. Reading Stats shows Books Read until you mark your first short read, then shows both completion counts. Choose Articles in Reading Stats settings if you prefer that label.
 - Support BOOX Picco and EEGO Reader A4 with touch, frontlight controls, and USB Drive support. Picco also supports its slide switch and tilt page turns.
 - Connect a reader to a computer running a compatible version of Inky to sync reading progress over USB. Reading stats and clippings can also sync using the computer’s internet connection.
 - Sync a selected EPUB’s progress or XTC’s reading stats from Library or File Browser. Sync Books under File Transfer covers the entire SD card. Both folder and whole-card sync include XTC stats, and compatible servers batch folder requests.

@@ -559,6 +559,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
   std::lock_guard<std::mutex> lock(_mutex);
   // Old settings files must not retain a previously selected runtime override.
   wifiTransmitPower = 0;
+  readingStatsCategoryLabel = DEFAULT_READING_STATS_CATEGORY_LABEL;
   bool needsResave = false;
   auto clamp = [](const uint8_t value, const uint8_t maxValue, const uint8_t fallback) {
     return value < maxValue ? value : fallback;
@@ -627,11 +628,10 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
       return;
     }
 
-    // Missing keys in older exports restore the original status font size,
-    // article label and bidirectional tilt behavior, even if this session changed them.
+    // Missing keys in older exports restore the original status font size and
+    // bidirectional tilt behavior, even if this session changed them.
     // Sensitivity also restores Normal for older exports and invalid values.
     const uint8_t fieldDefault = info.valuePtr == &CrossPointSettings::displayStatusBarTextSize ||
-                                         info.valuePtr == &CrossPointSettings::readingStatsCategoryLabel ||
                                          info.valuePtr == &CrossPointSettings::tiltNextPageOnly
                                      ? 0
                                      : this->*(info.valuePtr);

@@ -322,7 +322,7 @@ Tracked stats include:
 - Number of sessions
 - Pages turned
 - Average session time
-- Books read, with a separate article count after you first mark an EPUB as an article
+- Books read, with a separate count after you first mark an EPUB as a short read
 - Reading time for each day, with today's total and a 7-day average on the
   **This Device** stats page
 
@@ -336,22 +336,22 @@ sleep screen, including **Minimal Stats**.
 
 For two-device syncing, see [Reading Stats Sync](./reading-stats-sync.md).
 
-### Count an EPUB as an article
+### Count an EPUB as a short read
 
 Long-press the EPUB in **Library** or **Browse Files** and choose **Mark as
-Article**. While reading, the same action is under **Reader Menu > Settings**.
-Reading Stats shows **Books Read** by default. Marking your first article
-reveals **Articles Read**, even if you have yet to finish it. The title also
-appears as an article on its own stats page. Finishing it adds one to
-**Articles Read**. Changing the type of a title that already counted as finished
+Short Read**. While reading, the same action is under **Reader Menu > Settings**.
+Reading Stats shows **Books Read** by default. Marking your first short read
+reveals **Short Reads**, even if you have yet to finish it. The title also
+appears as a short read on its own stats page. Finishing it adds one to
+**Short Reads**. Changing the type of a title that already counted as finished
 moves its completion between categories. Choose **Mark as Book** to switch it
 back. Both counts stay visible until you reset that reading history. Books and
-articles both contribute to reading time, sessions, and streaks.
+short reads both contribute to reading time, sessions, and streaks.
 
-If you read essays or short stories, open **Settings > System > Reading Stats**
-and change **Article Label** to **Short Reads**. The action becomes **Mark as
-Short Read** and the stats screen calls the same count **Short Reads**. You can
-switch back to **Articles** at any time. The wording is personal to this reader.
+If you prefer **Articles**, open **Settings > System > Reading Stats** and
+change **Article Label**. The action becomes **Mark as Article** and the stats
+screen calls the same count **Articles Read**. The wording is personal to this
+reader, and updates preserve your saved choice.
 
 ### Turn tracking on or off
 
