@@ -9,7 +9,7 @@
 
 namespace {
 constexpr char CACHE_PATH[] = "/cache/book";
-const std::string statsPath = std::string(CACHE_PATH) + "/stats_v7.bin";
+const std::string statsPath = std::string(CACHE_PATH) + "/stats_v8.bin";
 const std::string previousStatsPath = std::string(CACHE_PATH) + "/stats_v5.bin";
 
 BookReadingStats statsWithSeconds(const uint32_t seconds) {
@@ -46,7 +46,7 @@ TEST_F(BookReadingStatsAtomicTest, TornSavePreservesNewestCompleteSlot) {
 
 TEST_F(BookReadingStatsAtomicTest, FirstUpgradePreservesSoleLegacyCopy) {
   ASSERT_TRUE(statsWithSeconds(123).save(CACHE_PATH));
-  Storage.data(statsPath).bytes.resize(91);  // complete payload without a slot trailer
+  Storage.data(statsPath).bytes.resize(107);  // complete payload without a slot trailer
   auto backup = Storage.open((statsPath + ".bak").c_str(), O_RDWR | O_CREAT);
   backup.close();
   Storage.data(statsPath + ".bak").writeLimit = 20;
@@ -54,7 +54,7 @@ TEST_F(BookReadingStatsAtomicTest, FirstUpgradePreservesSoleLegacyCopy) {
   EXPECT_EQ(BookReadingStats::load(CACHE_PATH).totalReadingSeconds, 123U);
   Storage.data(statsPath + ".bak").writeLimit = SIZE_MAX;
   ASSERT_TRUE(statsWithSeconds(456).save(CACHE_PATH));
-  EXPECT_EQ(Storage.data(statsPath).bytes.size(), 91u);
+  EXPECT_EQ(Storage.data(statsPath).bytes.size(), 107u);
   EXPECT_EQ(BookReadingStats::load(CACHE_PATH).totalReadingSeconds, 456U);
 }
 
@@ -71,7 +71,7 @@ TEST_F(BookReadingStatsAtomicTest, CrcFailureFallsBackAndCompletionPeekUsesNewes
 
 TEST_F(BookReadingStatsAtomicTest, LegacyCompleteTempStillRecoversBeforeBackup) {
   ASSERT_TRUE(statsWithSeconds(123).save(CACHE_PATH));
-  Storage.data(statsPath).bytes.resize(91);
+  Storage.data(statsPath).bytes.resize(107);
   ASSERT_TRUE(Storage.rename(statsPath.c_str(), (statsPath + ".bak").c_str()));
   auto temp = Storage.open((statsPath + ".tmp").c_str(), O_RDWR | O_CREAT);
   auto bytes = Storage.data(statsPath + ".bak").bytes;
@@ -103,7 +103,7 @@ TEST_F(BookReadingStatsAtomicTest, IdenticalSaveSkipsWrite) {
   EXPECT_EQ(Storage.data(statsPath + ".bak").bytes, std::vector<uint8_t>{7});
 
   statsWithSeconds(124).save(CACHE_PATH);
-  EXPECT_EQ(Storage.data(statsPath + ".bak").bytes.size(), 99u);
+  EXPECT_EQ(Storage.data(statsPath + ".bak").bytes.size(), 115u);
   EXPECT_EQ(BookReadingStats::load(CACHE_PATH).totalReadingSeconds, 124U);
 }
 
@@ -160,8 +160,8 @@ TEST_F(BookReadingStatsAtomicTest, UploadRejectsMissingTruncatedAndNewerSnapshot
   // Oversized future payload must not be accepted merely because its first
   // 75 bytes look like the current format.
   ASSERT_TRUE(Storage.openFileForWrite("TEST", statsPath, file));
-  uint8_t oversized[92]{};
-  oversized[0] = 7;
+  uint8_t oversized[108]{};
+  oversized[0] = 8;
   file.write(oversized, sizeof(oversized));
   file.close();
   EXPECT_FALSE(BookReadingStats::loadForUpload(CACHE_PATH, snapshot));

@@ -119,7 +119,7 @@ bool hasAnyBookStats(const BookReadingStats& stats) {
 
 bool hasAnyGlobalStats(const GlobalReadingStats& stats) {
   return stats.totalSessions > 0 || stats.totalReadingSeconds > 0 || stats.totalPagesTurned > 0 ||
-         stats.completedBooks > 0 || stats.displayLongestReadingStreak() > 0;
+         stats.completedBooks > 0 || stats.completedArticles > 0 || stats.displayLongestReadingStreak() > 0;
 }
 
 bool hasHeapForCarouselFrameCache() {

@@ -51,6 +51,17 @@ These actions run when you start them. They do not turn on automatic syncing
 when you close a book or put the reader to sleep. A separately installed plugin
 may have its own background behavior; see [Plugins](./sd-plugins.md).
 
+### Books and articles
+
+Readers send the total number of finished titles, separate book and article
+counts, and each EPUB’s classification. CrossPoint Sync servers that support
+article fields can keep the split. Servers that recognize only the original
+stats fields show one combined completion total. The Wi-Fi upload and the
+Inky USB relay use the same format.
+
+Classifying an EPUB affects that reader’s copy. Server stats uploads do not
+change how the EPUB is classified on another reader.
+
 ## Sync Books
 
 Choose **File Transfer > Sync Server > Sync Books**, confirm, and connect to
@@ -153,10 +164,13 @@ readers. It does not need a Wi-Fi network, server, or account.
 - Reading sessions
 - Reading time
 - Pages turned
-- Completed books
+- Completed books and articles, counted separately when both readers support articles
 
 It does not copy books, per-book positions, bookmarks, clippings, or settings.
 For your place in a book, use [Nearby Position Sync](./nearby-position-sync.md).
+
+An older Nearby receiver gets the combined completion total in its existing
+Books Read counter. To see both categories, update both readers.
 
 Each reader keeps its own totals and a saved copy of the other reader's totals.
 The combined view uses those copies until you sync again. Other readers' totals

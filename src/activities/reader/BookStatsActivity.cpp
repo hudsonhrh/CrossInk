@@ -166,17 +166,10 @@ void BookStatsActivity::applyCompletedState(const bool completed) {
     return;
   }
 
-  stats.isCompleted = completed;
-  if (completed) {
-    globalStats.completedBooks++;
-    if (!stats.finishedDateManual && !stats.finishedDate.isValid()) {
-      ReadingStatsDateTime now;
-      if (getCurrentLocalReadingStatsDateTime(now)) {
-        stats.finishedDate = now.date;
-      }
-    }
-  } else if (globalStats.completedBooks > 0) {
-    globalStats.completedBooks--;
+  globalStats.setCompleted(stats, completed, true);
+  if (completed && !stats.finishedDateManual && !stats.finishedDate.isValid()) {
+    ReadingStatsDateTime now;
+    if (getCurrentLocalReadingStatsDateTime(now)) stats.finishedDate = now.date;
   }
 }
 

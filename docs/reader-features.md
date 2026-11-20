@@ -322,7 +322,7 @@ Tracked stats include:
 - Number of sessions
 - Pages turned
 - Average session time
-- All-time totals, including total books read
+- Books read, with a separate article count after you first mark an EPUB as an article
 - Reading time for each day, with today's total and a 7-day average on the
   **This Device** stats page
 
@@ -335,6 +335,21 @@ sleep screen, including **Minimal Stats**.
 > have one, so it shows less detailed stats than the X3.
 
 For two-device syncing, see [Reading Stats Sync](./reading-stats-sync.md).
+
+### Count an EPUB as an article
+
+Long-press the EPUB in **Library** or **Browse Files** and choose **Mark as
+Article**. While reading, the same action is under **Reader Menu > Settings**.
+Reading Stats shows **Books Read** by default. Marking your first article
+reveals **Articles Read**, even if you have yet to finish it. The title also
+appears as an article on its own stats page. Finishing it adds one to
+**Articles Read**. Changing the type of a title that already counted as finished
+moves its completion between categories. Choose **Mark as Book** to switch it
+back. Both counts stay visible until you reset that reading history. Books and
+articles both contribute to reading time, sessions, and streaks.
+
+A standalone essay fits the article category. A collection of essays can stay
+a book if you read it as one volume.
 
 ### Turn tracking on or off
 

@@ -6,12 +6,16 @@
 #include "ReadingStatsUtils.h"
 #include "StatsCounterId.h"
 
-// Per-book reading statistics, persisted to cachePath/stats_v7_<reader>.bin.
+// Per-book reading statistics, persisted to cachePath/stats_v8_<reader>.bin.
 struct BookReadingStats {
   uint16_t sessionCount = 0;              // Total times this book was opened
   uint32_t totalReadingSeconds = 0;       // Accumulated reading time in seconds
   uint32_t totalPagesTurned = 0;          // Total forward page turns after the dwell threshold
   bool isCompleted = false;               // Whether the user manually marked this book as finished
+  bool isArticle = false;                 // EPUB classification
+  bool completionCredited = false;        // Its completion counted towards a global history
+  bool legacyCompletion = false;          // An older file recorded the finish without identifying its global credit
+  StatsCounterId completionCounterId;     // Global counter ID which received that credit
   uint16_t avgSecondsPerForwardPage = 0;  // Running average pace for time-left estimates
   uint16_t paceFractionMillis = 0;        // Millisecond remainder beyond avgSecondsPerForwardPage (0..999)
   uint16_t paceSampleCount = 0;           // Number of forward-page pace samples included in the average
@@ -24,7 +28,7 @@ struct BookReadingStats {
   std::array<uint32_t, READING_DAY_OF_WEEK_COUNT> dayOfWeekSeconds{};
   StatsCounterId counterId;
 
-  // Loads stats from cachePath/stats_v7_<reader>.bin, with fallback reads from the
+  // Loads stats from cachePath/stats_v8_<reader>.bin, with fallback reads from the
   // supported older versioned filenames and legacy cachePath/stats.bin. Returns
   // default-constructed stats if no compatible file exists.
   static BookReadingStats load(const std::string& cachePath);
@@ -37,7 +41,11 @@ struct BookReadingStats {
   // Checked export: false for missing, malformed, or unsupported snapshots.
   static bool loadForUpload(const std::string& cachePath, BookReadingStats& stats);
 
-  // Alternates checksum-checked device-qualified stats_v7 files and .bak snapshots in place.
+  // Initializes a fresh history only if no local snapshot exists.
+  static bool loadForEdit(const std::string& cachePath, BookReadingStats& stats, const StatsCounterId* freshId,
+                          bool& newHistory);
+
+  // Alternates checksum-checked device-qualified stats_v8 files and .bak snapshots in place.
   // Returns false if the new snapshot could not be saved.
   bool save(const std::string& cachePath) const;
 

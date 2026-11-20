@@ -94,6 +94,8 @@ void verifyStatsUploadContract() {
   std::vector<char> payload(StatsUploadPayload::CAPACITY);
   GlobalReadingStats global;
   require(!GlobalReadingStats::loadForUpload(global), "missing global stats must not export zeros");
+  global.completedBooks = 3;
+  global.completedArticles = 2;
   global.totalSessions = 12;
   global.totalReadingSeconds = 3456;
   global.readingHistoryAnchorDay = 9769;
@@ -104,7 +106,9 @@ void verifyStatsUploadContract() {
   require(StatsUploadPayload::global(payload.data(), payload.size(), "crossink-test", loaded), "global serialization");
   JsonDocument json;
   require(!deserializeJson(json, payload.data()), "global JSON");
-  require(json["v"] == 5 && json["seconds"] == 3456 && json["tod"].size() == 4 && json["dow"].size() == 7,
+  require(json["completed"] == 5 && json["completed_books"] == 3 && json["completed_articles"] == 2 &&
+              json["has_articles"] == true && json["v"] == 5 && json["seconds"] == 3456 && json["tod"].size() == 4 &&
+              json["dow"].size() == 7,
           "global fields");
   require(strlen(json["history_b64"].as<const char*>()) == 124 &&
               std::strncmp(json["history_b64"].as<const char*>(), "BwAA", 4) == 0,
@@ -125,6 +129,7 @@ void verifyStatsUploadContract() {
           "resume saving after recovery");
   // Every count at its maximum still fits the fixed request budget.
   global.totalSessions = global.totalReadingSeconds = global.totalPagesTurned = global.completedBooks = UINT32_MAX;
+  global.completedArticles = UINT32_MAX;
   global.timeOfDaySeconds.fill(UINT32_MAX);
   global.dayOfWeekSeconds.fill(UINT32_MAX);
   require(StatsUploadPayload::global(payload.data(), payload.size(), "crossink-test", global),
@@ -134,6 +139,7 @@ void verifyStatsUploadContract() {
   BookReadingStats book;
   book.startDate = {2000, 1, 1};
   book.finishedDate = {2099, 12, 31};
+  book.isArticle = true;
   book.isCompleted = true;
   book.sessionCount = UINT16_MAX;
   book.totalReadingSeconds = book.totalPagesTurned = book.estimatedTimeLeftSeconds = UINT32_MAX;
@@ -146,7 +152,7 @@ void verifyStatsUploadContract() {
   const auto item = json["items"][0];
   require(item["start_date"].as<uint64_t>() == 946684800ULL && item["finished_date"].as<uint64_t>() == 4102358400ULL,
           "dates remain UTC beyond 2038");
-  require(item["completed"].is<bool>() && item["completed"] == true, "boolean fields");
+  require(item["is_article"] == true && item["completed"].is<bool>() && item["completed"] == true, "boolean fields");
   // Do not leave fixture counters in the normal app-flow smoke session.
   Storage.remove(StatsStorage::localPath("/.crosspoint/global_stats.bin").c_str());
   Storage.remove((StatsStorage::localPath("/.crosspoint/global_stats.bin") + ".bak").c_str());

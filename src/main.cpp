@@ -107,6 +107,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "activities/ActivityManager.h"
 #include "activities/boot_sleep/ImageFolderIndex.h"
 #include "activities/home/BookActions.h"
+#include "activities/reader/GlobalReadingStats.h"
 #include "activities/reader/KOReaderSyncActivity.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/reader/ReadingStatsUtils.h"
@@ -1582,6 +1583,7 @@ void setup() {
 
   HalSystem::checkPanic();
 
+  GlobalReadingStats::recoverArticleTransfer();
   if (!PluginBundle::recoverPending()) LOG_ERR("PLUG", "Plugin install recovery pending");
   // I2C light capabilities must be known before settings validate saved gestures.
   // Apply brightness and wake policy only after the saved settings are loaded.

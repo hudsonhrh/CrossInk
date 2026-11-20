@@ -803,7 +803,7 @@ void XtcReaderActivity::finalizeReadingStatsOnExit() {
 void XtcReaderActivity::applyBookStatsEditsFromDisk() {
   if (!xtc) return;
   importBookStatsEdits(stats, BookReadingStats::load(xtc->getCachePath()));
-  globalStats.completedBooks = GlobalReadingStats::load().completedBooks;
+  importGlobalCompletionEdits(globalStats, GlobalReadingStats::load());
 }
 
 void XtcReaderActivity::resetCurrentBookStatsAfterDelete() {
@@ -821,7 +821,7 @@ void XtcReaderActivity::setBookCompleted(const bool isCompleted) {
     return;
   }
 
-  stats.isCompleted = isCompleted;
+  const bool countChanged = globalStats.setCompleted(stats, isCompleted, statsTrackingActive);
   if (isCompleted && statsTrackingActive && !stats.finishedDateManual) {
     ReadingStatsDateTime now;
     if (getCurrentLocalReadingStatsDateTime(now)) {
@@ -831,14 +831,7 @@ void XtcReaderActivity::setBookCompleted(const bool isCompleted) {
 
   const bool saved = stats.save(xtc->getCachePath());
   if (saved) pendingSync.mark(xtc->getPath(), SyncPending::STATS_BIT);
-  if (saved && statsTrackingActive) {
-    if (isCompleted) {
-      globalStats.completedBooks++;
-    } else if (globalStats.completedBooks > 0) {
-      globalStats.completedBooks--;
-    }
-    globalStats.save();
-  }
+  if (saved && countChanged) globalStats.saveSnapshot();
 }
 
 float XtcReaderActivity::getCurrentBookProgressPercent() const {

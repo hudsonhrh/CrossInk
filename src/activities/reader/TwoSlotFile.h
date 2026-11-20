@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <string>
 
 #include "ProgressRecord.h"
@@ -25,8 +26,8 @@
 namespace two_slot {
 
 constexpr size_t TRAILER_BYTES = 8;
-// Largest slot file: global stats v4 (175 B) plus the trailer. Callers static_assert their payload fits.
-constexpr size_t MAX_FILE_BYTES = 184;
+// Largest slot file: global stats v5 (184 B) plus the trailer. Callers static_assert their payload fits.
+constexpr size_t MAX_FILE_BYTES = 192;
 constexpr size_t MAX_PAYLOAD_BYTES = MAX_FILE_BYTES - TRAILER_BYTES;
 
 struct SlotRead {
@@ -37,7 +38,7 @@ struct SlotRead {
 
 // Reads one slot file into buf (MAX_FILE_BYTES).
 inline SlotRead readSlot(const char* tag, const char* path, size_t payloadSize, uint8_t* buf,
-                         const size_t previousPayloadSize = 0) {
+                         std::initializer_list<size_t> previousPayloadSizes = {}) {
   SlotRead result;
   if (payloadSize > MAX_PAYLOAD_BYTES) return result;
   // openFileForRead logs a failure for missing files; a missing slot is normal.
@@ -46,7 +47,9 @@ inline SlotRead readSlot(const char* tag, const char* path, size_t payloadSize, 
   HalFile file;
   if (!Storage.openFileForRead(tag, path, file)) return result;
   const size_t fileSize = file.fileSize();
-  if (previousPayloadSize && fileSize == previousPayloadSize + TRAILER_BYTES) payloadSize = previousPayloadSize;
+  for (const size_t size : previousPayloadSizes) {
+    if (fileSize == size + TRAILER_BYTES) payloadSize = size;
+  }
   const size_t want = std::min(fileSize, MAX_FILE_BYTES);
   const int n = file.read(buf, want);
   file.close();
@@ -73,7 +76,7 @@ inline SlotRead readSlot(const char* tag, const char* path, size_t payloadSize, 
 // returns its size, or 0 when neither slot is usable. `accept` sees the slot's
 // bytes and size (a legacy size may exceed the bytes read). payloadSize is the
 // current format's payload; only a file of that size plus the trailer is a slot record.
-// Two bounded 184-byte buffers avoid heap churn; 368 bytes is intentional on
+// Two bounded slot buffers avoid heap churn; their fixed stack space is intentional on
 // the main/render tasks and independent of book/file size.
 inline size_t read(const char* tag, const char* path, const char* backupPath, const size_t payloadSize,
                    bool (*accept)(const uint8_t* data, size_t size), uint8_t* out) {
@@ -98,15 +101,15 @@ inline size_t read(const char* tag, const char* path, const char* backupPath, co
 // the newest slot already holds these bytes.
 inline bool write(const char* tag, const char* path, const char* backupPath, const uint8_t* payload,
                   const size_t payloadSize, bool (*accept)(const uint8_t*, size_t) = nullptr,
-                  const size_t previousPayloadSize = 0) {
+                  std::initializer_list<size_t> previousPayloadSizes = {}, const char* firstWriteSuffix = nullptr) {
   if (payloadSize > MAX_PAYLOAD_BYTES) {
     LOG_ERR(tag, "Slot payload too large: %u", static_cast<unsigned>(payloadSize));
     return false;
   }
   uint8_t primaryBuf[MAX_FILE_BYTES] = {};
   uint8_t backupBuf[MAX_FILE_BYTES] = {};
-  SlotRead primary = readSlot(tag, path, payloadSize, primaryBuf, previousPayloadSize);
-  SlotRead backup = readSlot(tag, backupPath, payloadSize, backupBuf, previousPayloadSize);
+  SlotRead primary = readSlot(tag, path, payloadSize, primaryBuf, previousPayloadSizes);
+  SlotRead backup = readSlot(tag, backupPath, payloadSize, backupBuf, previousPayloadSizes);
   if (accept && !accept(primaryBuf, primary.size)) primary.slot.kind = progress_record::SlotKind::Invalid;
   if (accept && !accept(backupBuf, backup.size)) backup.slot.kind = progress_record::SlotKind::Invalid;
   const progress_record::SlotIndex newest = progress_record::newest(primary.slot, backup.slot);
@@ -122,16 +125,25 @@ inline bool write(const char* tag, const char* path, const char* backupPath, con
   progress_record::writeU32(record + payloadSize + 4, progress_record::crc32(record, payloadSize + 4));
   const char* target =
       progress_record::target(primary.slot, backup.slot) == progress_record::PRIMARY ? path : backupPath;
+  // A new versioned filename takes precedence over earlier file formats. Publish its
+  // first slot only after sync so a partial write cannot hide a valid older history.
+  if (firstWriteSuffix && !primary.present && !backup.present) {
+    const auto staged = std::string(path) + firstWriteSuffix;
+    if (!writeFileInPlace(tag, staged.c_str(), record, payloadSize + TRAILER_BYTES)) return false;
+    if (Storage.rename(staged.c_str(), path)) return true;
+    LOG_ERR(tag, "Cannot publish first stats slot: %s", path);
+    return false;
+  }
   return writeFileInPlace(tag, target, record, payloadSize + TRAILER_BYTES);
 }
 
 // Selection helper for legacy code that consumes an open file. The caller must
 // use payloadLength() before interpreting the file's bytes.
 inline std::string preferredPath(const char* tag, const std::string& path, size_t payloadSize,
-                                 bool versionedOnly = false, const size_t previousPayloadSize = 0) {
+                                 bool versionedOnly = false, std::initializer_list<size_t> previousPayloadSizes = {}) {
   uint8_t buffer[MAX_FILE_BYTES] = {};
-  const auto primary = readSlot(tag, path.c_str(), payloadSize, buffer, previousPayloadSize);
-  const auto backup = readSlot(tag, (path + ".bak").c_str(), payloadSize, buffer, previousPayloadSize);
+  const auto primary = readSlot(tag, path.c_str(), payloadSize, buffer, previousPayloadSizes);
+  const auto backup = readSlot(tag, (path + ".bak").c_str(), payloadSize, buffer, previousPayloadSizes);
   if (versionedOnly && primary.slot.kind != progress_record::SlotKind::Versioned &&
       backup.slot.kind != progress_record::SlotKind::Versioned)
     return path;

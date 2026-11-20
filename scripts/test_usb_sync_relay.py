@@ -63,16 +63,25 @@ void flow(size_t requestBytes) { incoming.insert(incoming.begin(), 1+(requestByt
 tests = r'''
 int main() {
  bool failed=false;char buffer[256];
- reply(200,R"({"until":1,"counter_ids":1})");
- flow(2);
- assert(relaySyncHttp(&failed,"PUT","/api/v1/stats/counters/global","{}",nullptr,buffer,sizeof(buffer),nullptr)==200);
- assert(!failed&&std::string(buffer)==R"({"until":1,"counter_ids":1})"&&acks==2);
- const auto nl=std::find(outgoing.begin(),outgoing.end(),'\n')-outgoing.begin();
- const auto metaSize=std::stoul(std::string(outgoing.begin()+5,outgoing.begin()+nl));
- JsonDocument meta;assert(!deserializeJson(meta,outgoing.data()+nl+1,metaSize));
- assert(meta["bytes"]==2 && meta["max_response"]==255);
- const size_t start=nl+1;
- assert(readLe32(outgoing.data()+start+metaSize+2)==esp_rom_crc32_le(0,outgoing.data()+start,metaSize+2));
+ struct ArticleRequest { const char* endpoint; const char* body; };
+ const ArticleRequest snapshots[] = {
+   {"/api/v1/stats/counters/global",R"({"completed":4,"completed_books":3,"completed_articles":1,"has_articles":true})"},
+   {"/api/v1/stats/counters/books",R"({"items":[{"completed":true,"is_article":true}]})"},
+ };
+ for(const auto& snapshot : snapshots) {
+   reply(200,R"({"until":1,"counter_ids":1})");
+   const auto length = strlen(snapshot.body);
+   flow(length);
+   assert(relaySyncHttp(&failed,"PUT",snapshot.endpoint,snapshot.body,nullptr,buffer,sizeof(buffer),nullptr)==200);
+   assert(!failed&&std::string(buffer)==R"({"until":1,"counter_ids":1})"&&acks==2);
+   const auto nl=std::find(outgoing.begin(),outgoing.end(),'\n')-outgoing.begin();
+   const auto metaSize=std::stoul(std::string(outgoing.begin()+5,outgoing.begin()+nl));
+   const size_t start=nl+1;
+   JsonDocument meta;assert(!deserializeJson(meta,outgoing.data()+start,metaSize));
+   assert(meta["bytes"]==length && meta["max_response"]==255);
+   assert(memcmp(outgoing.data()+start+metaSize,snapshot.body,length)==0);
+   assert(readLe32(outgoing.data()+start+metaSize+length)==esp_rom_crc32_le(0,outgoing.data()+start,metaSize+length));
+ }
  files["/upload.tmp"]=std::string(25000,'x');
  reply(200,R"({"until":1,"accepted":1})");
  flow(25000);

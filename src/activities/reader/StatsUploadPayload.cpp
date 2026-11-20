@@ -58,11 +58,16 @@ bool global(char* out, size_t capacity, const char* deviceId, const GlobalReadin
   Writer w(out, capacity);
   char counterId[33];
   s.counterId.hex(counterId);
+  // Older servers keep only completed, which has always counted every finished title.
+  const auto finishedTitles = static_cast<unsigned long long>(s.completedBooks) + s.completedArticles;
   w.add(
       "{\"device_id\":\"%s\",\"device\":\"CrossInk\",\"v\":5,\"sessions\":%lu,\"seconds\":%lu,\"pages\":%lu,"
-      "\"completed\":%lu,\"counter_id\":\"%s\"",
+      "\"completed\":%llu,\"counter_id\":\"%s\"",
       deviceId, static_cast<unsigned long>(s.totalSessions), static_cast<unsigned long>(s.totalReadingSeconds),
-      static_cast<unsigned long>(s.totalPagesTurned), static_cast<unsigned long>(s.completedBooks), counterId);
+      static_cast<unsigned long>(s.totalPagesTurned), finishedTitles, counterId);
+  w.add(",\"completed_books\":%lu,\"completed_articles\":%lu,\"has_articles\":%s",
+        static_cast<unsigned long>(s.completedBooks), static_cast<unsigned long>(s.completedArticles),
+        s.hasArticles() ? "true" : "false");
   w.array("tod", s.timeOfDaySeconds);
   w.array("dow", s.dayOfWeekSeconds);
   w.add(",\"anchor_day\":%lu,\"streak\":%u,\"history_b64\":\"", static_cast<unsigned long>(s.readingHistoryAnchorDay),
@@ -121,7 +126,7 @@ bool BookBatch::add(const char* document, const BookReadingStats& s) {
       s.finishedDateManual ? "true" : "false", unixDate(s.startDate), unixDate(s.finishedDate), counterId);
   w.array("tod", s.timeOfDaySeconds);
   w.array("dow", s.dayOfWeekSeconds);
-  w.add("}");
+  w.add(",\"is_article\":%s}", s.isArticle ? "true" : "false");
   if (!w.ok()) {
     out[length] = '\0';  // roll back the partial item
     return false;

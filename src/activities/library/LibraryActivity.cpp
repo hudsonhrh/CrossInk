@@ -1644,6 +1644,10 @@ void LibraryActivity::showBookActionMenu(const size_t bookIndex, const bool igno
                }
 
                switch (static_cast<FileBrowserAction>(actionResult->action)) {
+                 case FileBrowserAction::ToggleArticle:
+                   BookActions::drawToast(renderer, I18N.get(BookActions::toggleArticle(book.path)));
+                   delay(1000);
+                   return;
                  case FileBrowserAction::ToggleBookStatsTracking: {
                    bool enabled = false;
                    if (!BookActions::toggleBookStatsTracking(book.path, enabled)) {

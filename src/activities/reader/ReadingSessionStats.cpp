@@ -47,10 +47,21 @@ void commitReadingSession(BookReadingStats& book, GlobalReadingStats& global, co
 
 void importBookStatsEdits(BookReadingStats& live, const BookReadingStats& disk) {
   live.isCompleted = disk.isCompleted;
+  live.isArticle = disk.isArticle;
+  live.completionCounterId = disk.completionCounterId;
+  live.completionCredited = disk.completionCredited;
+  live.legacyCompletion = disk.legacyCompletion;
   live.startDateManual = disk.startDateManual;
   live.finishedDateManual = disk.finishedDateManual;
   live.startDate = disk.startDate;
   live.finishedDate = disk.finishedDate;
+}
+
+void importGlobalCompletionEdits(GlobalReadingStats& live, const GlobalReadingStats& disk) {
+  live.completedBooks = disk.completedBooks;
+  live.completedArticles = disk.completedArticles;
+  live.unassignedLegacyBooks = disk.unassignedLegacyBooks;
+  live.articleMarked = disk.articleMarked;
 }
 
 void refreshGlobalStatsAfterOverlay(GlobalReadingStats& live, const uint32_t resetRevisionAtOpen) {
@@ -58,7 +69,7 @@ void refreshGlobalStatsAfterOverlay(GlobalReadingStats& live, const uint32_t res
   if (GlobalReadingStats::localResetRevision() != resetRevisionAtOpen) {
     live = disk;
   } else {
-    live.completedBooks = disk.completedBooks;
+    importGlobalCompletionEdits(live, disk);
   }
 }
 

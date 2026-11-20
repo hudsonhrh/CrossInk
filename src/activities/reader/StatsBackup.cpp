@@ -116,16 +116,18 @@ bool writeBackupFile(const char* path, const uint8_t* data, const size_t size) {
   return two_slot::write(
       LOG_TAG, path, (std::string(path) + ".bak").c_str(), data, size,
       [](const uint8_t* bytes, size_t n) {
-        return (n == GlobalReadingStats::CURRENT_FILE_SIZE && bytes[0] == 4) || (n == 159 && bytes[0] == 3);
+        return (n == GlobalReadingStats::CURRENT_FILE_SIZE && bytes[0] == GlobalReadingStats::CURRENT_FILE_VERSION) ||
+               (n == GlobalReadingStats::V4_FILE_SIZE && bytes[0] == 4) || (n == 159 && bytes[0] == 3);
       },
-      159);
+      {GlobalReadingStats::V4_FILE_SIZE, 159});
 }
 
 // Identical automatic-backup suppression adapted from Sichroteph/YACP commit
 // 20af8aee8d3e1d560456753b08d1f52e5488621f (MIT). The fixed 64-byte chunk
 // keeps the comparison well below the C3's local-stack budget.
 bool backupFileMatches(const char* path, const uint8_t* expected, const size_t expectedSize) {
-  const std::string selected = two_slot::preferredPath(LOG_TAG, path, expectedSize, false, 159);
+  const std::string selected =
+      two_slot::preferredPath(LOG_TAG, path, expectedSize, false, {GlobalReadingStats::V4_FILE_SIZE, 159});
   FsFile file;
   if (!Storage.openFileForRead(LOG_TAG, selected.c_str(), file) ||
       two_slot::payloadLength(file, expectedSize) != expectedSize) {

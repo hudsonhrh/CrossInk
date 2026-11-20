@@ -627,6 +627,7 @@ void FileBrowserActivity::showDirectoryActionMenu(const std::string& entry, bool
                                return;
                              case FileBrowserAction::SyncProgress:
                              case FileBrowserAction::DeleteCache:
+                             case FileBrowserAction::ToggleArticle:
                              case FileBrowserAction::ToggleBookStatsTracking:
                              case FileBrowserAction::ReadingStats:
                              case FileBrowserAction::DeleteStats:
@@ -793,6 +794,16 @@ void FileBrowserActivity::showFileActionMenu(const std::string& entry, bool igno
             BookActions::syncProgress(renderer, mappedInput, fullPath, syncReturnResume());
             requestUpdate();
             return;
+          case FileBrowserAction::ToggleArticle: {
+            const StrId message = BookActions::toggleArticle(fullPath);
+            {
+              RenderLock lock(*this);
+              BookActions::drawToast(renderer, I18N.get(message));
+            }
+            delay(1000);
+            requestUpdate();
+            return;
+          }
           case FileBrowserAction::ToggleBookStatsTracking: {
             bool enabled = false;
             {

@@ -2105,8 +2105,7 @@ void EpubReaderActivity::applyBookStatsEditsFromDisk() {
     importBookStatsEdits(stats, BookReadingStats::load(epub->getCachePath()));
   }
 
-  const GlobalReadingStats diskGlobalStats = GlobalReadingStats::load();
-  globalStats.completedBooks = diskGlobalStats.completedBooks;
+  importGlobalCompletionEdits(globalStats, GlobalReadingStats::load());
 }
 
 void EpubReaderActivity::handleBookStatsReturn(const bool returnToReaderMenu) {
@@ -2760,6 +2759,7 @@ void EpubReaderActivity::openReaderMenu() {
   uint32_t stableCurrentPage = 0;
   uint32_t stablePageCount = 0;
   bool isBookCompleted;
+  bool isArticle;
   bool previewActive = false;
   // Only the button menu has a book header to show it in.
   const bool showChapterTitle = !mappedInput.hasTouchHardware();
@@ -2788,6 +2788,7 @@ void EpubReaderActivity::openReaderMenu() {
       epub->resolveReferencePage(currentSpineIndex, sectionProgress, stableCurrentPage, resolvedPageCount);
     }
     isBookCompleted = stats.isCompleted;
+    isArticle = stats.isArticle;
     bookProgress = getCurrentBookProgressPercent();
     if (showChapterTitle && !previewActive) chapterTitle = currentChapterTitle();
   }
@@ -2831,6 +2832,7 @@ void EpubReaderActivity::openReaderMenu() {
     requestUpdate();
     return;
   }
+  menuActivity->setArticle(isArticle);
   menuActivity->setChapterTitle(std::move(chapterTitle));
 #if CROSSINK_SCALABLE_FONTS
   menuActivity->setPublisherBodyFontProbe(
@@ -2931,7 +2933,7 @@ void EpubReaderActivity::openReaderMenu() {
       }
       if (menu->reopenDrawer &&
           (action == EpubReaderMenuAction::BOOKMARK_TOGGLE || action == EpubReaderMenuAction::TOGGLE_COMPLETED ||
-           action == EpubReaderMenuAction::RESET_READING_PACE ||
+           action == EpubReaderMenuAction::TOGGLE_ARTICLE || action == EpubReaderMenuAction::RESET_READING_PACE ||
            action == EpubReaderMenuAction::TOGGLE_BOOK_STATS_TRACKING)) {
         openReaderMenu();
       }
@@ -4584,6 +4586,18 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuAction action, const 
       });
       break;
     }
+    case EpubReaderMenuAction::TOGGLE_ARTICLE: {
+      if (!epub) break;
+      bool article = false;
+      if (GlobalReadingStats::toggleArticle(epub->getCachePath(), article, &stats, &globalStats.counterId)) {
+        refreshGlobalStatsAfterOverlay(globalStats, GlobalReadingStats::localResetRevision());
+        pendingSync.mark(epub->getPath(), SyncPending::STATS_BIT);
+      } else {
+        drawToast(renderer, tr(STR_SAVE_TYPE_FAILED));
+        delay(1000);
+      }
+      break;
+    }
     case EpubReaderMenuAction::TOGGLE_BOOK_STATS_TRACKING: {
       if (!epub || !SETTINGS.shouldTrackReadingStats()) break;
       const bool enabled = !bookStatsEnabled;
@@ -6149,7 +6163,7 @@ void EpubReaderActivity::setBookCompleted(bool isCompleted) {
     return;
   }
 
-  stats.isCompleted = isCompleted;
+  const bool countChanged = globalStats.setCompleted(stats, isCompleted, statsTrackingActive);
   if (isCompleted && statsTrackingActive && !stats.finishedDateManual) {
     ReadingStatsDateTime now;
     if (getCurrentLocalReadingStatsDateTime(now)) {
@@ -6175,14 +6189,7 @@ void EpubReaderActivity::setBookCompleted(bool isCompleted) {
   if (!stats.save(epub->getCachePath())) return;
   pendingSync.mark(epub->getPath(), SyncPending::STATS_BIT);
   BookSyncFile::onFinishedChanged(epub->getPath(), isCompleted);
-  if (statsTrackingActive) {
-    if (isCompleted) {
-      globalStats.completedBooks++;
-    } else if (globalStats.completedBooks > 0) {
-      globalStats.completedBooks--;
-    }
-    globalStats.save();
-  }
+  if (countChanged) globalStats.saveSnapshot();
 }
 
 void EpubReaderActivity::showCompletedFeedback(bool isCompleted) {

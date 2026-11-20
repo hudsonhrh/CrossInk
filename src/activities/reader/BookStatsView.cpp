@@ -23,7 +23,7 @@ namespace {
 constexpr int kStatsButtonHintTopGap = 10;
 constexpr int kStandaloneNoRtcMaxTopCardHeightDivisor = 2;
 constexpr int kStandaloneNoRtcMaxVerticalOffset = 32;
-constexpr int kPerBookRtcTopCardMaxExtra = 84;
+constexpr int kRtcTopCardMaxExtra = 84;
 // BookStatsActivity draws page dots just above the button hints, inside the last card's bottom edge.
 constexpr int kPageIndicatorClearance = 14;
 
@@ -111,7 +111,7 @@ int statsHeaderHeight(const ThemeMetrics& metrics, const StatsLayout& layout, co
 
 int statsContentHeight(const StatsLayout& layout, const int headerHeight, const bool globalPage,
                        const bool showRtcStats) {
-  const int topCardH = globalPage ? layout.globalCardH : layout.topCardH;
+  const int topCardH = globalPage && !showRtcStats ? layout.globalCardH : layout.topCardH;
   if (!showRtcStats) {
     return headerHeight + layout.topGap + topCardH;
   }
@@ -179,18 +179,6 @@ StatsLayout measuredStatsLayout(const GfxRenderer& renderer, StatsLayout layout,
   return layout;
 }
 
-int perBookRtcTopCardHeight(const StatsLayout& layout, const int extraHeight) {
-  return layout.topCardH + std::min(extraHeight, kPerBookRtcTopCardMaxExtra);
-}
-
-int globalRtcCardHeightForPerBookRowSpacing(const StatsLayout& layout, const int perBookExtraHeight) {
-  constexpr int perBookDataRowCount = 3;
-  constexpr int globalDataRowCount = 2;
-  const int perBookDataRowH =
-      (perBookRtcTopCardHeight(layout, perBookExtraHeight) - layout.topCardTitleH) / perBookDataRowCount;
-  return std::max(layout.globalCardH, layout.topCardTitleH + perBookDataRowH * globalDataRowCount);
-}
-
 // Tightens the top card's rows so the page dots clear the last card. Returns the total height reserved;
 // anything the top card cannot give up comes out of the chart cards instead.
 int pageIndicatorClearance(int& extraTopCardHeight, const bool showPageIndicators) {
@@ -207,12 +195,7 @@ StatsLayout getStatsLayout(const GfxRenderer& renderer, const MappedInputManager
   const auto compactLayout = measuredStatsLayout(renderer, kCompactLayout, showRtcStats);
   if (statsLandscape(renderer)) return compactLayout;
   const int defaultHeaderHeight = statsHeaderHeight(metrics, defaultLayout, mappedInput);
-  const bool defaultFitsCurrentPage =
-      statsContentHeight(defaultLayout, defaultHeaderHeight, globalPage, showRtcStats) <= availableHeight;
-  const bool defaultMatchesPerBookCharts =
-      !globalPage || !showRtcStats ||
-      statsContentHeight(defaultLayout, defaultHeaderHeight, false, showRtcStats) <= availableHeight;
-  if (defaultFitsCurrentPage && defaultMatchesPerBookCharts) {
+  if (statsContentHeight(defaultLayout, defaultHeaderHeight, globalPage, showRtcStats) <= availableHeight) {
     return defaultLayout;
   }
   return compactLayout;
@@ -304,6 +287,21 @@ void drawStatCell(const GfxRenderer& renderer, const int x, const int w, const i
   drawCenteredLabel(renderer, SMALL_FONT_ID, x, w, textY + valueLineH + 4, label);
 }
 
+// The six common metrics fill two rows in portrait, or three rows in a narrow landscape card.
+struct StatGrid {
+  int x, y, cellW, cellH, columns;
+
+  void draw(const GfxRenderer& renderer, const int index, const char* value, const char* label) const {
+    drawStatCell(renderer, x + (index % columns) * cellW, cellW, y + (index / columns) * cellH, cellH, value, label);
+  }
+};
+
+StatGrid statsGrid(const int x, const int y, const int w, const int h, const bool thirdRow, const bool narrow) {
+  const int columns = narrow ? 2 : 3;
+  const int rows = thirdRow || narrow ? 3 : 2;
+  return {x, y, w / columns, h / rows, columns};
+}
+
 void drawSectionCard(const GfxRenderer& renderer, const int x, const int y, const int w, const int h, const char* title,
                      const StatsLayout& layout) {
   renderer.drawRect(x, y, w, h);
@@ -355,37 +353,38 @@ void drawHorizontalBars(GfxRenderer& renderer, const int x, const int y, const i
 void drawPerBookStatsCard(GfxRenderer& renderer, const int x, const int y, const int w, const int h,
                           const std::string& bookTitle, const BookReadingStats& stats, const float progressPercent,
                           const bool hasEstimatedTimeLeft, const uint32_t estimatedTimeLeftSeconds,
-                          const StatsLayout& layout) {
+                          const StatsLayout& layout, const bool narrow = false) {
   renderer.drawRect(x, y, w, h);
   renderer.drawLine(x, y + layout.topCardTitleH, x + w, y + layout.topCardTitleH);
-  const std::string visibleTitle =
-      renderer.truncatedText(renderer.filenameFontId(UI_10_FONT_ID), bookTitle.c_str(), w - 20, EpdFontFamily::BOLD);
-  drawCenteredLabel(renderer, renderer.filenameFontId(UI_10_FONT_ID), x, w,
-                    y + (layout.topCardTitleH - renderer.getLineHeight(UI_10_FONT_ID)) / 2, visibleTitle.c_str(), true);
+  const int titleFont = renderer.filenameFontId(UI_10_FONT_ID);
+  const int titleY = y + (layout.topCardTitleH - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
+  if (stats.isArticle) {
+    const std::string title = std::string(tr(STR_STATS_ARTICLE)) + " · " + bookTitle;
+    drawCenteredLabel(renderer, titleFont, x + 6, w - 12, titleY, title.c_str(), true);
+  } else {
+    drawCenteredLabel(renderer, titleFont, x + 6, w - 12, titleY, bookTitle.c_str(), true);
+  }
 
   const bool showRtcStats = shouldShowRtcBasedStats();
-  const int thirdW = w / 3;
-  const int halfW = w / 2;
-  const int rowCount = showRtcStats ? 3 : 2;
-  const int rowH = (h - layout.topCardTitleH) / rowCount;
+  const StatGrid grid = statsGrid(x, y + layout.topCardTitleH, w, h - layout.topCardTitleH, showRtcStats, narrow);
   char buf[40];
 
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(stats.sessionCount));
-  drawStatCell(renderer, x, thirdW, y + layout.topCardTitleH, rowH, buf, tr(STR_STATS_SESSIONS_LBL));
+  grid.draw(renderer, 0, buf, tr(STR_STATS_SESSIONS_LBL));
 
   BookReadingStats::formatDuration(stats.totalReadingSeconds, buf, sizeof(buf));
-  drawStatCell(renderer, x + thirdW, thirdW, y + layout.topCardTitleH, rowH, buf, tr(STR_STATS_TIME_LBL));
+  grid.draw(renderer, 1, buf, tr(STR_STATS_TIME_LBL));
 
   if (progressPercent >= 0.0f) {
     snprintf(buf, sizeof(buf), "%d%%", static_cast<int>(progressPercent + 0.5f));
   } else {
     snprintf(buf, sizeof(buf), "-");
   }
-  drawStatCell(renderer, x + thirdW * 2, thirdW, y + layout.topCardTitleH, rowH, buf, tr(STR_STATS_PROGRESS_LBL));
+  grid.draw(renderer, 2, buf, tr(STR_STATS_PROGRESS_LBL));
 
   const uint32_t avgSecs = stats.sessionCount > 0 ? stats.totalReadingSeconds / stats.sessionCount : 0;
   BookReadingStats::formatDuration(avgSecs, buf, sizeof(buf));
-  drawStatCell(renderer, x, thirdW, y + layout.topCardTitleH + rowH, rowH, buf, tr(STR_STATS_AVG_SESSION_LBL));
+  grid.draw(renderer, 3, buf, tr(STR_STATS_AVG_SESSION_LBL));
 
   uint32_t fallbackEstimateSeconds = 0;
   uint32_t cachedEstimateSeconds = 0;
@@ -399,11 +398,10 @@ void drawPerBookStatsCard(GfxRenderer& renderer, const int x, const int y, const
   } else {
     snprintf(buf, sizeof(buf), "-");
   }
-  drawStatCell(renderer, x + thirdW, thirdW, y + layout.topCardTitleH + rowH, rowH, buf, tr(STR_TIME_LEFT));
+  grid.draw(renderer, 4, buf, tr(STR_TIME_LEFT));
 
   snprintf(buf, sizeof(buf), "%.1f", pagesPerMinute(stats.totalPagesTurned, stats.totalReadingSeconds));
-  drawStatCell(renderer, x + thirdW * 2, thirdW, y + layout.topCardTitleH + rowH, rowH, buf,
-               tr(STR_STATS_PAGES_PER_MIN));
+  grid.draw(renderer, 5, buf, tr(STR_STATS_PAGES_PER_MIN));
 
   if (!showRtcStats) {
     return;
@@ -425,10 +423,11 @@ void drawPerBookStatsCard(GfxRenderer& renderer, const int x, const int y, const
   char dateBuf[24];
   formatReadingStatsShortDate(stats.startDate, dateBuf, sizeof(dateBuf));
   snprintf(startedLabel, sizeof(startedLabel), "%s %s", tr(STR_STATS_STARTED), dateBuf);
-  const int startedY = y + layout.topCardTitleH + rowH * 2;
-  TouchRegistry::getInstance().add(Rect(x, startedY, halfW, rowH), BookStatsTouchTarget::StartedDaysStat,
+  const int startedY = grid.y + grid.cellH * 2;
+  const int halfW = w / 2;
+  TouchRegistry::getInstance().add(Rect(x, startedY, halfW, grid.cellH), BookStatsTouchTarget::StartedDaysStat,
                                    TouchRegistry::Item);
-  drawStatCell(renderer, x, halfW, startedY, rowH, buf, startedLabel);
+  drawStatCell(renderer, x, halfW, startedY, grid.cellH, buf, startedLabel);
 
   ReadingStatsDate finishDisplayDate;
   bool finished = stats.isCompleted;
@@ -445,7 +444,7 @@ void drawPerBookStatsCard(GfxRenderer& renderer, const int x, const int y, const
     }
   }
   formatReadingStatsShortDate(finishDisplayDate, buf, sizeof(buf));
-  drawStatCell(renderer, x + halfW, halfW, y + layout.topCardTitleH + rowH * 2, rowH, buf,
+  drawStatCell(renderer, x + halfW, halfW, startedY, grid.cellH, buf,
                finished ? tr(STR_STATS_FINISHED_DATE) : tr(STR_STATS_EST_FINISH_DATE));
 }
 
@@ -460,75 +459,79 @@ void formatDailyDuration(const uint32_t seconds, char* buf, const size_t len) {
 
 void drawGlobalStatsCard(GfxRenderer& renderer, const int x, const int y, const int w, const int h, const char* title,
                          const GlobalReadingStats& stats, const StatsLayout& layout,
-                         const DailyReadingStats::Summary* daily = nullptr) {
+                         const DailyReadingStats::Summary* daily = nullptr, const bool narrow = false) {
   renderer.drawRect(x, y, w, h);
   renderer.drawLine(x, y + layout.topCardTitleH, x + w, y + layout.topCardTitleH);
   const bool showRtcStats = shouldShowRtcBasedStats();
   drawCenteredLabel(renderer, UI_10_FONT_ID, x, w,
                     y + (layout.topCardTitleH - renderer.getLineHeight(UI_10_FONT_ID)) / 2, title, true);
 
-  const int thirdW = w / 3;
-  const int halfW = w / 2;
-  const bool showDailyRow = showRtcStats && daily != nullptr;
-  const int rowH = (h - layout.topCardTitleH) / (showDailyRow ? 3 : 2);
+  const bool showArticles = stats.hasArticles();
+  const bool thirdRow = showRtcStats && (daily || showArticles);
+  const StatGrid grid =
+      statsGrid(x, y + layout.topCardTitleH, w, h - layout.topCardTitleH, thirdRow, narrow && showArticles);
   char buf[40];
 
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(stats.totalSessions));
-  drawStatCell(renderer, x, thirdW, y + layout.topCardTitleH, rowH, buf, tr(STR_STATS_SESSIONS_LBL));
+  grid.draw(renderer, 0, buf, tr(STR_STATS_SESSIONS_LBL));
 
   BookReadingStats::formatDuration(stats.totalReadingSeconds, buf, sizeof(buf));
-  drawStatCell(renderer, x + thirdW, thirdW, y + layout.topCardTitleH, rowH, buf, tr(STR_STATS_TIME_LBL));
+  grid.draw(renderer, 1, buf, tr(STR_STATS_TIME_LBL));
 
   snprintf(buf, sizeof(buf), "%.1f", pagesPerMinute(stats.totalPagesTurned, stats.totalReadingSeconds));
-  drawStatCell(renderer, x + thirdW * 2, thirdW, y + layout.topCardTitleH, rowH, buf, tr(STR_STATS_PAGES_PER_MIN));
+  grid.draw(renderer, 2, buf, tr(STR_STATS_PAGES_PER_MIN));
 
   const uint32_t avgSecs = stats.totalSessions > 0 ? stats.totalReadingSeconds / stats.totalSessions : 0;
   BookReadingStats::formatDuration(avgSecs, buf, sizeof(buf));
-  if (showRtcStats) {
-    drawStatCell(renderer, x, thirdW, y + layout.topCardTitleH + rowH, rowH, buf, tr(STR_STATS_AVG_SESSION_LBL));
-  } else {
-    drawStatCell(renderer, x, halfW, y + layout.topCardTitleH + rowH, rowH, buf, tr(STR_STATS_AVG_SESSION_LBL));
-  }
+  char completedBooks[12];
+  snprintf(completedBooks, sizeof(completedBooks), "%lu", static_cast<unsigned long>(stats.completedBooks));
+  const char* booksRead = stats.completedBooks || showArticles ? completedBooks : "-";
 
-  if (showRtcStats) {
-    ReadingStatsDateTime today;
-    const bool hasToday = getCurrentLocalReadingStatsDateTime(today);
-    const uint16_t currentStreak = hasToday ? stats.currentReadingStreak(&today.date) : 0;
-    if (currentStreak > 0) {
-      snprintf(buf, sizeof(buf), "%u %s", static_cast<unsigned>(currentStreak), dayCountText(currentStreak));
-    } else {
-      snprintf(buf, sizeof(buf), "-");
-    }
-    drawStatCell(renderer, x + thirdW, thirdW, y + layout.topCardTitleH + rowH, rowH, buf,
-                 tr(STR_STATS_READING_STREAK_LBL));
+  if (!showRtcStats && !showArticles) {
+    const int halfW = w / 2;
+    const int secondRowY = grid.y + grid.cellH;
+    drawStatCell(renderer, x, halfW, secondRowY, grid.cellH, buf, tr(STR_STATS_AVG_SESSION_LBL));
+    drawStatCell(renderer, x + halfW, halfW, secondRowY, grid.cellH, booksRead, tr(STR_STATS_COMPLETED_LBL));
+    return;
   }
+  grid.draw(renderer, 3, buf, tr(STR_STATS_AVG_SESSION_LBL));
+  grid.draw(renderer, showArticles ? 4 : 5, booksRead, tr(STR_STATS_COMPLETED_LBL));
+  if (showArticles) {
+    snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(stats.completedArticles));
+    grid.draw(renderer, 5, buf, tr(STR_STATS_ARTICLES_READ));
+  }
+  if (!showRtcStats) return;
 
-  if (stats.completedBooks > 0) {
-    snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(stats.completedBooks));
+  ReadingStatsDateTime today;
+  const bool hasToday = getCurrentLocalReadingStatsDateTime(today);
+  const uint16_t currentStreak = hasToday ? stats.currentReadingStreak(&today.date) : 0;
+  if (currentStreak > 0) {
+    snprintf(buf, sizeof(buf), "%u %s", static_cast<unsigned>(currentStreak), dayCountText(currentStreak));
   } else {
     snprintf(buf, sizeof(buf), "-");
   }
-  drawStatCell(renderer, showRtcStats ? x + thirdW * 2 : x + halfW, showRtcStats ? thirdW : halfW,
-               y + layout.topCardTitleH + rowH, rowH, buf, tr(STR_STATS_COMPLETED_LBL));
-
-  if (!showDailyRow) {
-    return;
+  if (showArticles && !daily) {
+    drawStatCell(renderer, x, w, grid.y + 2 * grid.cellH, grid.cellH, buf, tr(STR_STATS_READING_STREAK_LBL));
+  } else {
+    grid.draw(renderer, showArticles ? 6 : 4, buf, tr(STR_STATS_READING_STREAK_LBL));
   }
+  if (!daily) return;
 
-  const int dailyY = y + layout.topCardTitleH + rowH * 2;
+  const int dailyColumns = showArticles ? 3 : 2;
+  const StatGrid dailyRow{x, grid.y + 2 * grid.cellH, w / dailyColumns, grid.cellH, dailyColumns};
   if (daily->hasToday) {
     formatDailyDuration(daily->todaySeconds, buf, sizeof(buf));
   } else {
     snprintf(buf, sizeof(buf), "-");
   }
-  drawStatCell(renderer, x, halfW, dailyY, rowH, buf, tr(STR_STATS_TODAY_LBL));
+  dailyRow.draw(renderer, dailyColumns - 2, buf, tr(STR_STATS_TODAY_LBL));
 
   if (daily->hasSevenDayAverage) {
     formatDailyDuration(daily->sevenDayAverageSeconds, buf, sizeof(buf));
   } else {
     snprintf(buf, sizeof(buf), "-");
   }
-  drawStatCell(renderer, x + halfW, halfW, dailyY, rowH, buf, tr(STR_STATS_SEVEN_DAY_AVG_LBL));
+  dailyRow.draw(renderer, dailyColumns - 1, buf, tr(STR_STATS_SEVEN_DAY_AVG_LBL));
 }
 
 void drawDateField(const GfxRenderer& renderer, const int x, const int y, const int w, const char* text,
@@ -598,7 +601,7 @@ void renderPerBookStatsPage(GfxRenderer& renderer, const MappedInputManager* map
     const int compactContentHeight =
         headerHeight + layout.topGap + layout.topCardH + layout.cardGap + timeOfDayH + layout.cardGap + dayOfWeekH;
     const int extraHeight = std::max(0, availableHeight - compactContentHeight);
-    int extraTopCardHeight = std::min(extraHeight, kPerBookRtcTopCardMaxExtra);
+    int extraTopCardHeight = std::min(extraHeight, kRtcTopCardMaxExtra);
     const int indicatorClearance = pageIndicatorClearance(extraTopCardHeight, showButtonHints);
     const int remainingExtraHeight = std::max(0, extraHeight - extraTopCardHeight - indicatorClearance);
     const int timeOfDayExtraHeight = (remainingExtraHeight * 4) / 11;
@@ -649,16 +652,16 @@ void renderGlobalStatsPage(GfxRenderer& renderer, const MappedInputManager* mapp
                            const DailyReadingStats::Summary* daily, const bool showSyncAction) {
   renderer.clearScreen();
   const bool showRtcStats = shouldShowRtcBasedStats();
-  // With the daily row the card has three data rows, so it is sized exactly like the per-book card.
-  const bool showDailyRow = showRtcStats && daily != nullptr;
+  const bool thirdRow = showRtcStats && (daily || stats.hasArticles());
+  const char* cardTitle = stats.hasArticles() ? tr(STR_STATS_ALL_READING) : tr(STR_STATS_ALL_TIME);
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto& layout = getStatsLayout(renderer, mappedInput, !showDailyRow, showButtonHints, showRtcStats);
+  const auto& layout = getStatsLayout(renderer, mappedInput, true, showButtonHints, showRtcStats);
   drawStatsHeader(renderer, mappedInput, screenTitle, showButtonHints, false, showSyncAction);
   const auto safe = statsSafeArea(renderer, showButtonHints);
   const int cardX = safe.x + metrics.contentSidePadding;
   const int cardW = safe.width - metrics.contentSidePadding * 2;
   const int availableHeight = statsAvailableHeight(renderer, showButtonHints);
-  int globalCardH = showDailyRow ? layout.topCardH : layout.globalCardH;
+  int globalCardH = thirdRow ? layout.topCardH : layout.globalCardH;
   const int headerHeight = statsHeaderHeight(metrics, layout, mappedInput);
   const auto header = UITheme::getHeaderRect(renderer, headerHeight, safe);
   int y = header.y + header.height + layout.topGap;
@@ -672,8 +675,7 @@ void renderGlobalStatsPage(GfxRenderer& renderer, const MappedInputManager* mapp
     const int timeH = sectionCardHeight(layout, static_cast<int>(TIME_BUCKET_LABELS.size()));
     const int dayH = sectionCardHeight(layout, static_cast<int>(DAY_LABELS.size()));
     const int bodyH = std::max(globalCardH, timeH + layout.cardGap + dayH);
-    drawGlobalStatsCard(renderer, cardX, y, leftW, bodyH, tr(STR_STATS_ALL_TIME), stats, layout,
-                        showDailyRow ? daily : nullptr);
+    drawGlobalStatsCard(renderer, cardX, y, leftW, bodyH, cardTitle, stats, layout, daily);
     drawSectionCard(renderer, chartX, y, chartW, timeH, tr(STR_STATS_TIME_OF_DAY), layout);
     drawHorizontalBars(renderer, chartX, y, chartW, timeH, stats.timeOfDaySeconds, TIME_BUCKET_LABELS, layout);
     const int dayY = y + timeH + layout.cardGap;
@@ -685,13 +687,14 @@ void renderGlobalStatsPage(GfxRenderer& renderer, const MappedInputManager* mapp
     const int compactContentHeight =
         headerHeight + layout.topGap + globalCardH + layout.cardGap + timeOfDayH + layout.cardGap + dayOfWeekH;
     const int extraHeight = std::max(0, availableHeight - compactContentHeight);
-    int extraTopCardHeight = std::min(extraHeight, kPerBookRtcTopCardMaxExtra);
-    if (!showDailyRow) {
-      const int perBookCompactContentHeight =
-          headerHeight + layout.topGap + layout.topCardH + layout.cardGap + timeOfDayH + layout.cardGap + dayOfWeekH;
-      const int perBookExtraHeight = std::max(0, availableHeight - perBookCompactContentHeight);
-      const int targetGlobalCardH = globalRtcCardHeightForPerBookRowSpacing(layout, perBookExtraHeight);
-      extraTopCardHeight = std::min(extraHeight, std::max(0, targetGlobalCardH - layout.globalCardH));
+    int extraTopCardHeight = std::min(extraHeight, kRtcTopCardMaxExtra);
+    if (!thirdRow) {
+      // Keep the two-row All Devices card aligned with the row spacing on the per-title page.
+      const int perBookExtra = std::max(0, extraHeight - (layout.topCardH - layout.globalCardH));
+      const int perBookRowH =
+          (layout.topCardH + std::min(perBookExtra, kRtcTopCardMaxExtra) - layout.topCardTitleH) / 3;
+      const int targetHeight = layout.topCardTitleH + perBookRowH * 2;
+      extraTopCardHeight = std::min(extraHeight, std::max(0, targetHeight - layout.globalCardH));
     }
     const int indicatorClearance = pageIndicatorClearance(extraTopCardHeight, showButtonHints);
     const int remainingExtraHeight = std::max(0, extraHeight - extraTopCardHeight - indicatorClearance);
@@ -701,8 +704,7 @@ void renderGlobalStatsPage(GfxRenderer& renderer, const MappedInputManager* mapp
     const int dayOfWeekCardH = dayOfWeekH + dayOfWeekExtraHeight;
     globalCardH += extraTopCardHeight;
 
-    drawGlobalStatsCard(renderer, cardX, y, cardW, globalCardH, tr(STR_STATS_ALL_TIME), stats, layout,
-                        showDailyRow ? daily : nullptr);
+    drawGlobalStatsCard(renderer, cardX, y, cardW, globalCardH, cardTitle, stats, layout, daily);
     y += globalCardH + layout.cardGap;
 
     drawSectionCard(renderer, cardX, y, cardW, timeOfDayCardH, tr(STR_STATS_TIME_OF_DAY), layout);
@@ -714,7 +716,7 @@ void renderGlobalStatsPage(GfxRenderer& renderer, const MappedInputManager* mapp
   } else {
     const int compactContentHeight = headerHeight + layout.topGap + layout.globalCardH;
     globalCardH += std::max(0, availableHeight - compactContentHeight);
-    drawGlobalStatsCard(renderer, cardX, y, cardW, globalCardH, tr(STR_STATS_ALL_TIME), stats, layout);
+    drawGlobalStatsCard(renderer, cardX, y, cardW, globalCardH, cardTitle, stats, layout);
   }
 
   if (showButtonHints && mappedInput) {
@@ -755,15 +757,16 @@ void renderNoRtcCombinedStatsPage(GfxRenderer& renderer, const MappedInputManage
   const auto header = UITheme::getHeaderRect(renderer, headerHeight, safe);
   int y = header.y + header.height + layout.topGap;
   if (statsLandscape(renderer)) {
+    const bool narrow = allDevicesStats != nullptr;
     const int columnW = (cardW - layout.cardGap * (visibleCardCount - 1)) / visibleCardCount;
     const int cardH = std::max(layout.globalCardH, availableHeight - headerHeight - layout.topGap);
     drawPerBookStatsCard(renderer, cardX, y, columnW, cardH, bookTitle, bookStats, progressPercent,
-                         hasEstimatedTimeLeft, estimatedTimeLeftSeconds, layout);
+                         hasEstimatedTimeLeft, estimatedTimeLeftSeconds, layout, narrow && bookStats.isArticle);
     drawGlobalStatsCard(renderer, cardX + columnW + layout.cardGap, y, columnW, cardH, tr(STR_STATS_THIS_DEVICE_SCREEN),
-                        deviceStats, layout);
+                        deviceStats, layout, nullptr, narrow);
     if (allDevicesStats) {
       drawGlobalStatsCard(renderer, cardX + (columnW + layout.cardGap) * 2, y, columnW, cardH,
-                          tr(STR_STATS_ALL_DEVICES_SCREEN), *allDevicesStats, layout);
+                          tr(STR_STATS_ALL_DEVICES_SCREEN), *allDevicesStats, layout, nullptr, narrow);
     }
   } else {
     drawPerBookStatsCard(renderer, cardX, y, cardW, perBookCardH, bookTitle, bookStats, progressPercent,

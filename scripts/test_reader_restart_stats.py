@@ -38,6 +38,7 @@ bool BookReadingStats::save(const std::string&)const {
 bool saveToFile(const GlobalReadingStats& stats,const char*,const char*) {
   ++globalWrites; if(globalFails)return false; savedGlobal=stats; return true;
 }
+bool GlobalReadingStats::recoveryRequired(){return s_blockDestructiveSave;}
 bool GlobalReadingStats::loadForUpload(GlobalReadingStats& out){out=savedGlobal;return true;}
 GlobalReadingStats GlobalReadingStats::load(){return savedGlobal;}
 uint32_t GlobalReadingStats::localResetRevision(){return 0;}
@@ -227,6 +228,7 @@ def main():
                 methods += source[start:end] + "}}\n"
                 index += 1
     global_stats = (ROOT / "src/activities/reader/GlobalReadingStats.cpp").read_text()
+    methods += method(global_stats, "bool GlobalReadingStats::saveSnapshot()")
     methods += method(global_stats, "bool GlobalReadingStats::save()")
     with tempfile.TemporaryDirectory(prefix="crossink-restart-stats-") as directory:
         source = Path(directory) / "restart.cpp"

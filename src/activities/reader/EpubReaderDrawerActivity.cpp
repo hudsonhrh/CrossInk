@@ -1915,6 +1915,9 @@ void EpubReaderDrawerActivity::activateRow(const RowId row) {
       isCurrentPageBookmarked = !isCurrentPageBookmarked;
       closeAndReturn(false, EpubReaderMenuAction::BOOKMARK_TOGGLE, !mappedInput.hasTouchHardware());
       return;
+    case RowId::ToggleArticle:
+      closeAndReturn(false, EpubReaderMenuAction::TOGGLE_ARTICLE, true);
+      return;
     case RowId::ToggleCompleted:
       isBookCompleted = !isBookCompleted;
       closeAndReturn(false, EpubReaderMenuAction::TOGGLE_COMPLETED);
@@ -3255,6 +3258,8 @@ const char* EpubReaderDrawerActivity::rowLabel(const RowId row) const {
       return tr(STR_EPUB_RENDER_MODE);
     case RowId::IndexingMethod:
       return tr(STR_INDEXING_METHOD);
+    case RowId::ToggleArticle:
+      return isArticle ? tr(STR_MARK_AS_BOOK) : tr(STR_MARK_AS_ARTICLE);
     case RowId::ToggleCompleted:
       return isBookCompleted ? tr(STR_MARK_UNFINISHED) : tr(STR_MARK_FINISHED);
     case RowId::TrackBookStats:
@@ -3451,6 +3456,7 @@ bool EpubReaderDrawerActivity::rowShowsNavigationCaret(const RowId row) const {
   if (rowValue(row, value, sizeof(value)) != nullptr) return false;
   switch (row) {
     case RowId::BookmarkToggle:
+    case RowId::ToggleArticle:
     case RowId::ToggleCompleted:
     case RowId::Screenshot:
     case RowId::DisplayQr:
