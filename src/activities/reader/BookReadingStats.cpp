@@ -106,11 +106,13 @@ bool validPaceFraction(const uint8_t* data) {
   return fraction < 1000 && (readLe16(data, 12) != UINT16_MAX || fraction == 0);
 }
 
-bool openRecoverableStatsFile(const std::string& path, FsFile& f, const uint8_t version = STATS_FILE_VERSION) {
-  const std::string local = StatsStorage::localPath(path);
+bool openRecoverableStatsFile(const std::string& local, FsFile& f, const uint8_t version = STATS_FILE_VERSION,
+                              const bool forEdit = false) {
   if (local.empty()) return false;
-  const std::string selected = two_slot::preferredPath("STATS", local, statsSizeForVersion(version), true);
+  const std::string selected = two_slot::preferredPath("STATS", local, statsSizeForVersion(version), true, {}, forEdit);
+  if (selected.empty()) return false;
   if (Storage.openFileForRead("STATS", selected, f)) return true;
+  if (forEdit && Storage.exists(selected.c_str())) return false;
 
   for (const char* suffix : {".tmp", ".bak"}) {
     const std::string recoveryPath = local + suffix;
@@ -121,40 +123,47 @@ bool openRecoverableStatsFile(const std::string& path, FsFile& f, const uint8_t 
     // through to the older, known-good backup.
     if (strcmp(suffix, ".tmp") == 0) {
       FsFile candidate;
-      if (!Storage.openFileForRead("STATS", recoveryPath, candidate)) continue;
+      if (!Storage.openFileForRead("STATS", recoveryPath, candidate)) {
+        if (forEdit) return false;
+        continue;
+      }
       uint8_t data[STATS_FILE_SIZE] = {};
       const size_t fileSize = candidate.fileSize();
       const int n = candidate.read(data, STATS_FILE_SIZE);
-      candidate.close();
+      const bool closed = candidate.close();
+      if (forEdit && (!closed || n != static_cast<int>(std::min(fileSize, sizeof(data))))) return false;
       if (fileSize != static_cast<size_t>(statsSizeForVersion(version)) || n != statsSizeForVersion(version) ||
           data[0] != version || (version >= STATS_FILE_VERSION_V6 && !validPaceFraction(data)))
         continue;
     }
 
     if (Storage.rename(recoveryPath.c_str(), local.c_str())) {
-      LOG_INF("STATS", "Recovered interrupted stats save: %s", path.c_str());
-      const std::string restoredPath = two_slot::preferredPath("STATS", local, statsSizeForVersion(version), true);
-      if (Storage.openFileForRead("STATS", restoredPath, f)) return true;
+      LOG_INF("STATS", "Recovered interrupted stats save: %s", local.c_str());
+      const std::string restoredPath =
+          two_slot::preferredPath("STATS", local, statsSizeForVersion(version), true, {}, forEdit);
+      if (!restoredPath.empty() && Storage.openFileForRead("STATS", restoredPath, f)) return true;
+      if (forEdit) return false;
     }
 
     if (Storage.openFileForRead("STATS", recoveryPath, f)) {
-      LOG_ERR("STATS", "Could not restore %s; reading recovery file directly", path.c_str());
+      LOG_ERR("STATS", "Could not restore %s; reading recovery file directly", local.c_str());
       return true;
     }
+    if (forEdit) return false;
   }
   return false;
 }
 
 bool openStatsFileForRead(const std::string& cachePath, FsFile& f) {
   const std::string currentName = statsFileNameForVersion(STATS_FILE_VERSION);
-  if (openRecoverableStatsFile(cachePath + "/" + currentName, f)) {
+  if (openRecoverableStatsFile(StatsStorage::localPath(cachePath + "/" + currentName), f)) {
     return true;
   }
 
   // Keep all supported versioned migration sources, including v4 after the v6 bump.
   for (uint8_t version = STATS_FILE_VERSION - 1; version >= OLDEST_VERSIONED_STATS_FILE_VERSION; --version) {
     const std::string previousName = statsFileNameForVersion(version);
-    if (openRecoverableStatsFile(cachePath + "/" + previousName, f, version)) {
+    if (openRecoverableStatsFile(StatsStorage::localPath(cachePath + "/" + previousName), f, version)) {
       LOG_DBG("STATS", "Migrating %s to %s", previousName.c_str(), currentName.c_str());
       return true;
     }
@@ -273,38 +282,7 @@ BookReadingStats BookReadingStats::load(const std::string& cachePath) {
   return stats;
 }
 
-bool BookReadingStats::loadForEdit(const std::string& cachePath, BookReadingStats& stats,
-                                   const StatsCounterId* freshId, bool& newHistory) {
-  newHistory = false;
-  if (loadForUpload(cachePath, stats)) return true;
-
-  // Do not turn an unreadable local history into an empty one. Resolve ownership
-  // before probing, since a copied card may also hold another reader's files.
-  const auto files = StatsStorage::bookFiles(cachePath);
-  for (uint8_t version = 0; version <= STATS_FILE_VERSION; ++version) {
-    if (!files.slots[version]) continue;
-    const auto legacy = cachePath + "/" + (version ? statsFileNameForVersion(version) : LEGACY_STATS_FILE_NAME);
-    const auto path = StatsStorage::localPath(legacy);
-    if (path.empty()) return false;
-    for (const char* suffix : {"", ".bak", ".tmp"}) {
-      if (Storage.exists((path + suffix).c_str())) {
-        LOG_ERR("STATS", "Cannot edit unreadable history: %s", path.c_str());
-        return false;
-      }
-    }
-  }
-  stats = {};
-  stats.counterId = freshId ? *freshId : StatsCounterId::create();
-  newHistory = true;
-  return true;
-}
-
-bool BookReadingStats::loadForUpload(const std::string& cachePath, BookReadingStats& stats) {
-  stats = {};
-  FsFile f;
-  if (!openStatsFileForRead(cachePath, f)) {
-    return false;
-  }
+static bool readStatsPayload(FsFile& f, BookReadingStats& stats) {
   uint8_t data[STATS_FILE_SIZE] = {};
   // Older versioned filenames may also contain checksum-protected slots.
   uint8_t version = 0;
@@ -314,8 +292,8 @@ bool BookReadingStats::loadForUpload(const std::string& cachePath, BookReadingSt
   }
   const size_t fileSize = two_slot::payloadLength(f, statsSizeForVersion(version));
   const int n = f.read(data, std::min(fileSize, sizeof(data)));
-  f.close();
-  if (n < 0 || static_cast<size_t>(n) != fileSize) {
+  const bool closed = f.close();
+  if (!closed || n < 0 || static_cast<size_t>(n) != fileSize) {
     LOG_ERR("STATS", "Incomplete or oversized stats snapshot");
     return false;
   }
@@ -395,6 +373,40 @@ bool BookReadingStats::loadForUpload(const std::string& cachePath, BookReadingSt
   }
   if (n >= STATS_FILE_SIZE_V7)
     memcpy(stats.counterId.bytes.data(), data + STATS_FILE_SIZE_V6, stats.counterId.bytes.size());
+  return true;
+}
+
+bool BookReadingStats::loadForUpload(const std::string& cachePath, BookReadingStats& stats) {
+  stats = {};
+  FsFile f;
+  return openStatsFileForRead(cachePath, f) && readStatsPayload(f, stats);
+}
+
+bool BookReadingStats::loadForEdit(const std::string& cachePath, BookReadingStats& stats, const StatsCounterId* freshId,
+                                   bool& newHistory) {
+  stats = {};
+  newHistory = false;
+  // A migrated book may still have an older readable snapshot. Only its newest
+  // owned file family can supply an edit, or a read failure could roll back the book.
+  const auto files = StatsStorage::bookFiles(cachePath);
+  for (int version = STATS_FILE_VERSION; version >= 0; --version) {
+    if (!files.slots[version]) continue;
+    const auto legacy = cachePath + "/" + (version ? statsFileNameForVersion(version) : LEGACY_STATS_FILE_NAME);
+    const auto path = StatsStorage::localPath(legacy);
+    if (path.empty()) return false;
+    if (!Storage.exists(path.c_str()) && !Storage.exists((path + ".bak").c_str()) &&
+        !Storage.exists((path + ".tmp").c_str()))
+      continue;
+    FsFile file;
+    const bool opened = version >= OLDEST_VERSIONED_STATS_FILE_VERSION
+                            ? openRecoverableStatsFile(path, file, version, true)
+                            : version == 0 && Storage.openFileForRead("STATS", path, file);
+    if (opened && readStatsPayload(file, stats)) return true;
+    LOG_ERR("STATS", "Cannot edit unreadable history: %s", path.c_str());
+    return false;
+  }
+  stats.counterId = freshId ? *freshId : StatsCounterId::create();
+  newHistory = true;
   return true;
 }
 

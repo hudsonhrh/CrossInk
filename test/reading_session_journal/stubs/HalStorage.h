@@ -27,6 +27,7 @@ struct HostFaults {
   bool failOpenWrite = false;
   std::string failRenameFrom;
   std::string failReadPath;
+  std::string failNextReadPath;
   std::string failNextWritePath;
   std::string readErrorPath;
   size_t readErrorAfter = 0;
@@ -188,6 +189,10 @@ class HalStorage {
   bool openFileForRead(const char*, const std::string& path, HalFile& file) {
     ++faults.readOpens;
     if (faults.failReadPath == path) return false;
+    if (faults.failNextReadPath == path) {
+      faults.failNextReadPath.clear();
+      return false;
+    }
     const auto it = files.find(path);
     if (it == files.end()) return false;
     file = HalFile(it->second, path);

@@ -1229,3 +1229,161 @@ TEST_F(StatsStorageTest, NearbyExportsSeparateOrCombinedCountsForTheReceivingRea
             GlobalReadingStats::V4_FILE_SIZE);
   EXPECT_EQ(progress_record::readU32(payload.data() + 13), UINT32_MAX);
 }
+
+TEST_F(StatsStorageTest, ClassificationDoesNotReplaceUnreadableCurrentStatsWithOlderMigrationCopy) {
+  legacyBook(45);
+  auto book = BookReadingStats::load(CACHE);
+  book.totalReadingSeconds = 1234;
+  ASSERT_TRUE(book.save(CACHE));
+  const auto current = StatsStorage::localPath(std::string(CACHE) + "/stats_v8.bin");
+  const auto original = Storage.files.at(current)->bytes;
+  faults.failReadPath = current;
+  bool article = false;
+  EXPECT_FALSE(GlobalReadingStats::toggleArticle(CACHE, article));
+  EXPECT_EQ(Storage.files.at(current)->bytes, original);
+  EXPECT_FALSE(Storage.exists((current + ".bak").c_str()));
+  faults.failReadPath.clear();
+  ASSERT_TRUE(GlobalReadingStats::toggleArticle(CACHE, article));
+  EXPECT_TRUE(article);
+  EXPECT_EQ(BookReadingStats::load(CACHE).totalReadingSeconds, 1234u);
+}
+
+TEST_F(StatsStorageTest, ClassificationWaitsForUnreadableSlotAndKeepsOtherReadersHistory) {
+  auto localBook = BookReadingStats::load(CACHE);
+  localBook.totalReadingSeconds = 1234;
+  ASSERT_TRUE(localBook.save(CACHE));
+  localBook.totalReadingSeconds = 5678;
+  ASSERT_TRUE(localBook.save(CACHE));
+  const auto local = StatsStorage::localPath(std::string(CACHE) + "/stats_v8.bin");
+  const auto primary = Storage.files.at(local)->bytes;
+  const auto backup = Storage.files.at(local + ".bak")->bytes;
+
+  switchReader(6);
+  bool article = false;
+  ASSERT_TRUE(GlobalReadingStats::toggleArticle(CACHE, article));
+  const auto other = StatsStorage::localPath(std::string(CACHE) + "/stats_v8.bin");
+  const auto otherPrimary = Storage.files.at(other)->bytes;
+  const auto otherBackup = Storage.files.at(other + ".bak")->bytes;
+  ASSERT_NE(other, local);
+  switchReader(5);
+  faults.failReadPath = local + ".bak";
+  EXPECT_FALSE(GlobalReadingStats::toggleArticle(CACHE, article));
+  EXPECT_EQ(Storage.files.at(local)->bytes, primary);
+  EXPECT_EQ(Storage.files.at(local + ".bak")->bytes, backup);
+  faults.failReadPath.clear();
+  ASSERT_TRUE(GlobalReadingStats::toggleArticle(CACHE, article));
+  EXPECT_TRUE(article);
+  EXPECT_EQ(BookReadingStats::load(CACHE).totalReadingSeconds, 5678u);
+  EXPECT_EQ(Storage.files.at(other)->bytes, otherPrimary);
+  EXPECT_EQ(Storage.files.at(other + ".bak")->bytes, otherBackup);
+}
+
+TEST_F(StatsStorageTest, ClassificationLeavesUnreadableRecoveryFileForRetry) {
+  legacyBook(45);
+  auto book = BookReadingStats::load(CACHE);
+  book.totalReadingSeconds = 1234;
+  ASSERT_TRUE(book.save(CACHE));
+  const auto path = StatsStorage::localPath(std::string(CACHE) + "/stats_v8.bin");
+  const auto temp = path + ".tmp";
+  auto payload = Storage.files.at(path)->bytes;
+  payload.resize(payload.size() - two_slot::TRAILER_BYTES);
+  writeBytes(temp, payload);
+  ASSERT_TRUE(Storage.remove(path.c_str()));
+  faults.failReadPath = temp;
+  bool article = false;
+  EXPECT_FALSE(GlobalReadingStats::toggleArticle(CACHE, article));
+  EXPECT_EQ(Storage.files.at(temp)->bytes, payload);
+  EXPECT_FALSE(Storage.exists(path.c_str()));
+  faults.failReadPath.clear();
+  ASSERT_TRUE(GlobalReadingStats::toggleArticle(CACHE, article));
+  EXPECT_TRUE(article);
+  EXPECT_EQ(BookReadingStats::load(CACHE).totalReadingSeconds, 1234u);
+}
+
+TEST_F(StatsStorageTest, ClassificationDoesNotUseOlderBackupWhenReopeningPromotedTempFails) {
+  auto book = BookReadingStats::load(CACHE);
+  book.totalReadingSeconds = 1234;
+  ASSERT_TRUE(book.save(CACHE));
+  const auto path = StatsStorage::localPath(std::string(CACHE) + "/stats_v8.bin");
+  auto payload = Storage.files.at(path)->bytes;
+  payload.resize(payload.size() - two_slot::TRAILER_BYTES);
+  auto old = payload;
+  progress_record::writeU32(old.data() + 3, 45);
+  ASSERT_TRUE(Storage.remove(path.c_str()));
+  writeBytes(path + ".tmp", payload);
+  writeBytes(path + ".bak", old);
+
+  faults.failReadPath = path;
+  bool article = false;
+  EXPECT_FALSE(GlobalReadingStats::toggleArticle(CACHE, article));
+  EXPECT_EQ(Storage.files.at(path)->bytes, payload);
+  EXPECT_EQ(Storage.files.at(path + ".bak")->bytes, old);
+  faults.failReadPath.clear();
+  ASSERT_TRUE(GlobalReadingStats::toggleArticle(CACHE, article));
+  EXPECT_EQ(BookReadingStats::load(CACHE).totalReadingSeconds, 1234u);
+}
+
+TEST_F(StatsStorageTest, RecoveryDoesNotRollBackCommittedClassificationDuringTransientReadFailure) {
+  std::vector<uint8_t> v7(91);
+  v7[0] = 7;
+  v7[75] = 0x77;
+  writeBytes(std::string(CACHE) + "/stats_v7.bin", v7);
+  auto global = GlobalReadingStats::load();
+  ASSERT_TRUE(global.saveSnapshot());
+  const auto marker = StatsStorage::localPath("/.crosspoint/global_stats.bin") + ".article";
+  faults.powerCutOnRemove = marker;
+  bool article = false;
+  EXPECT_THROW(GlobalReadingStats::toggleArticle(CACHE, article), SimulatedPowerCut);
+  switchReader(5);
+  const auto current = StatsStorage::localPath(std::string(CACHE) + "/stats_v8.bin");
+  faults.failReadPath = current;
+  EXPECT_FALSE(GlobalReadingStats::recoverArticleTransfer());
+  EXPECT_TRUE(Storage.exists(marker.c_str()));
+  faults.failReadPath.clear();
+  EXPECT_TRUE(GlobalReadingStats::recoverArticleTransfer());
+  EXPECT_TRUE(BookReadingStats::load(CACHE).isArticle);
+  EXPECT_TRUE(GlobalReadingStats::load().hasArticles());
+}
+
+TEST_F(StatsStorageTest, ClassificationWaitsForUnreadableGlobalSlotBeforePublishing) {
+  auto global = GlobalReadingStats::load();
+  global.totalReadingSeconds = 100;
+  ASSERT_TRUE(global.saveSnapshot());
+  global.totalReadingSeconds = 200;
+  ASSERT_TRUE(global.saveSnapshot());
+  const auto path = StatsStorage::localPath("/.crosspoint/global_stats.bin");
+  const auto primary = Storage.files.at(path)->bytes;
+  const auto backup = Storage.files.at(path + ".bak")->bytes;
+
+  bool article = false;
+  for (const auto& slot : {path, path + ".bak"}) {
+    faults.failNextReadPath = slot;
+    EXPECT_FALSE(GlobalReadingStats::toggleArticle(CACHE, article));
+    EXPECT_FALSE(article);
+    EXPECT_EQ(Storage.files.at(path)->bytes, primary);
+    EXPECT_EQ(Storage.files.at(path + ".bak")->bytes, backup);
+    EXPECT_FALSE(Storage.exists((path + ".article").c_str()));
+  }
+  ASSERT_TRUE(GlobalReadingStats::toggleArticle(CACHE, article));
+  EXPECT_EQ(GlobalReadingStats::load().totalReadingSeconds, 200u);
+}
+
+TEST_F(StatsStorageTest, RecoveryDoesNotRollBackCommittedGlobalTotalsOnOneShotOpenFailure) {
+  auto global = GlobalReadingStats::load();
+  ASSERT_TRUE(global.saveSnapshot());
+  const auto path = StatsStorage::localPath("/.crosspoint/global_stats.bin");
+  const auto marker = path + ".article";
+  faults.powerCutOnRemove = marker;
+  bool article = false;
+  EXPECT_THROW(GlobalReadingStats::toggleArticle(CACHE, article), SimulatedPowerCut);
+  switchReader(5);
+  const auto primary = Storage.files.at(path)->bytes;
+  const auto backup = Storage.files.at(path + ".bak")->bytes;
+  faults.failNextReadPath = path + ".bak";
+  EXPECT_FALSE(GlobalReadingStats::recoverArticleTransfer());
+  EXPECT_TRUE(Storage.exists(marker.c_str()));
+  EXPECT_EQ(Storage.files.at(path)->bytes, primary);
+  EXPECT_EQ(Storage.files.at(path + ".bak")->bytes, backup);
+  ASSERT_TRUE(GlobalReadingStats::recoverArticleTransfer());
+  EXPECT_TRUE(GlobalReadingStats::load().hasArticles());
+}

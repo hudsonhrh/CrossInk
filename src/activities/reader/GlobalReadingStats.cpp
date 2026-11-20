@@ -176,50 +176,34 @@ void serializeStats(const GlobalReadingStats& stats, uint8_t* data) {
   data[183] = stats.hasArticles() ? 1 : 0;
 }
 
-StatsLoadOutcome loadFromOpenFile(FsFile& f, GlobalReadingStats& out) {
-  StatsLoadOutcome outcome;
-  uint8_t version = 0;
-  if (f.read(&version, 1) != 1 || !f.seekSet(0)) return outcome;
-  const size_t payloadSize = version == 3   ? GLOBAL_STATS_FILE_SIZE_V3
-                             : version == 4 ? GLOBAL_STATS_FILE_SIZE_V4
-                                            : GLOBAL_STATS_FILE_SIZE;
-  outcome.fileSize = two_slot::payloadLength(f, payloadSize);
-  uint8_t data[GLOBAL_STATS_FILE_SIZE] = {};
-  const size_t bytesToRead = std::min(outcome.fileSize, static_cast<size_t>(GLOBAL_STATS_FILE_SIZE));
-  const int n = f.read(data, bytesToRead);
-  if (n <= 0 || static_cast<size_t>(n) != bytesToRead) return outcome;
-  outcome.version = data[0];
+size_t slotPayloadSize(uint8_t version) {
+  if (version == 3) return GLOBAL_STATS_FILE_SIZE_V3;
+  if (version == 4) return GLOBAL_STATS_FILE_SIZE_V4;
+  return GLOBAL_STATS_FILE_SIZE;
+}
 
-  // A torn trailer from either generation can be present while upgrading.
-  if (version >= 3 && version <= GLOBAL_STATS_VERSION && outcome.fileSize > payloadSize &&
-      outcome.fileSize < payloadSize + two_slot::TRAILER_BYTES)
-    return outcome;
+StatsLoadResult classifyGlobalPayload(uint8_t version, size_t size) {
+  const size_t payloadSize = slotPayloadSize(version);
+  // An interrupted slot upgrade can leave just part of the trailer.
+  if (version >= 3 && version <= GLOBAL_STATS_VERSION && size > payloadSize &&
+      size < payloadSize + two_slot::TRAILER_BYTES)
+    return StatsLoadResult::Invalid;
+  if (size > GLOBAL_STATS_FILE_SIZE || version > GLOBAL_STATS_VERSION) return StatsLoadResult::NewerFormat;
+  if ((version == 1 && size == GLOBAL_STATS_FILE_SIZE_V1) || (version == 2 && size == GLOBAL_STATS_FILE_SIZE_V2) ||
+      (version >= 3 && version <= GLOBAL_STATS_VERSION && size == payloadSize))
+    return StatsLoadResult::Ok;
+  return StatsLoadResult::Invalid;
+}
 
-  if (outcome.fileSize > static_cast<size_t>(GLOBAL_STATS_FILE_SIZE) || outcome.version > GLOBAL_STATS_VERSION) {
-    outcome.result = StatsLoadResult::NewerFormat;
-    return outcome;
-  }
-
+void decodeGlobalPayload(const uint8_t* data, size_t n, GlobalReadingStats& out) {
   out = {};
-  if (n == GLOBAL_STATS_FILE_SIZE_V1 && data[0] == GLOBAL_STATS_VERSION_V1) {
-    loadCommonFields(data, out);
-    out.completedBooks = 0;
-    outcome.result = StatsLoadResult::Ok;
-    return outcome;
-  }
-
-  if (n == GLOBAL_STATS_FILE_SIZE_V2 && data[0] == GLOBAL_STATS_VERSION_V2) {
-    loadCommonFields(data, out);
-    out.unassignedLegacyBooks = out.completedBooks = readLe32(data, 13);
-    outcome.result = StatsLoadResult::Ok;
-    return outcome;
-  }
-
-  if (!((n == GLOBAL_STATS_FILE_SIZE && data[0] == GLOBAL_STATS_VERSION) ||
-        (n == GLOBAL_STATS_FILE_SIZE_V4 && data[0] == 4) || (n == GLOBAL_STATS_FILE_SIZE_V3 && data[0] == 3)))
-    return outcome;
   loadCommonFields(data, out);
+  if (n == GLOBAL_STATS_FILE_SIZE_V1) return;
   out.completedBooks = readLe32(data, 13);
+  if (n == GLOBAL_STATS_FILE_SIZE_V2) {
+    out.unassignedLegacyBooks = out.completedBooks;
+    return;
+  }
   for (size_t i = 0; i < out.timeOfDaySeconds.size(); ++i) {
     out.timeOfDaySeconds[i] = readLe32(data, 17 + static_cast<int>(i) * 4);
   }
@@ -229,7 +213,7 @@ StatsLoadOutcome loadFromOpenFile(FsFile& f, GlobalReadingStats& out) {
   out.readingHistoryAnchorDay = readLe32(data, 61);
   memcpy(out.readingHistoryBits.data(), data + 65, out.readingHistoryBits.size());
   out.longestReadingStreak = readLe16(data, 157);
-  if (n >= static_cast<int>(GLOBAL_STATS_FILE_SIZE_V4))
+  if (n >= GLOBAL_STATS_FILE_SIZE_V4)
     memcpy(out.counterId.bytes.data(), data + GLOBAL_STATS_FILE_SIZE_V3, out.counterId.bytes.size());
   if (n == GLOBAL_STATS_FILE_SIZE) {
     out.completedArticles = readLe32(data, GLOBAL_STATS_FILE_SIZE_V4);
@@ -238,7 +222,20 @@ StatsLoadOutcome loadFromOpenFile(FsFile& f, GlobalReadingStats& out) {
   } else {
     out.unassignedLegacyBooks = out.completedBooks;
   }
-  outcome.result = StatsLoadResult::Ok;
+}
+
+StatsLoadOutcome loadFromOpenFile(FsFile& f, GlobalReadingStats& out) {
+  StatsLoadOutcome outcome;
+  uint8_t version = 0;
+  if (f.read(&version, 1) != 1 || !f.seekSet(0)) return outcome;
+  outcome.fileSize = two_slot::payloadLength(f, slotPayloadSize(version));
+  uint8_t data[GLOBAL_STATS_FILE_SIZE] = {};
+  const size_t bytesToRead = std::min(outcome.fileSize, sizeof(data));
+  const int n = f.read(data, bytesToRead);
+  if (n <= 0 || static_cast<size_t>(n) != bytesToRead) return outcome;
+  outcome.version = data[0];
+  outcome.result = classifyGlobalPayload(outcome.version, outcome.fileSize);
+  if (outcome.result == StatsLoadResult::Ok) decodeGlobalPayload(data, outcome.fileSize, out);
   return outcome;
 }
 
@@ -258,11 +255,7 @@ bool saveToFile(const GlobalReadingStats& stats, const char* path, const char* b
   return two_slot::write(
       "GSTATS", path, backupPath, data, sizeof(data),
       [](const uint8_t* bytes, size_t size) {
-        return (size == GLOBAL_STATS_FILE_SIZE && bytes[0] == GLOBAL_STATS_VERSION) ||
-               (size == GLOBAL_STATS_FILE_SIZE_V4 && bytes[0] == 4) ||
-               (size == GLOBAL_STATS_FILE_SIZE_V1 && bytes[0] == GLOBAL_STATS_VERSION_V1) ||
-               (size == GLOBAL_STATS_FILE_SIZE_V2 && bytes[0] == GLOBAL_STATS_VERSION_V2) ||
-               (size == GLOBAL_STATS_FILE_SIZE_V3 && bytes[0] == 3);
+        return size != 0 && classifyGlobalPayload(bytes[0], size) == StatsLoadResult::Ok;
       },
       {GLOBAL_STATS_FILE_SIZE_V4, GLOBAL_STATS_FILE_SIZE_V3}, ".new");
 }
@@ -367,8 +360,7 @@ size_t GlobalReadingStats::copyForNearby(const std::array<uint8_t, CURRENT_FILE_
   return size;
 }
 
-static GlobalReadingStats loadLocalStats(bool* newHistory = nullptr) {
-  if (newHistory) *newHistory = false;
+static GlobalReadingStats loadLocalStats() {
   GlobalReadingStats stats;
   if (s_articleRecoveryPending) return stats;
   const std::string path = StatsStorage::localPath(GLOBAL_STATS_PATH);
@@ -408,7 +400,6 @@ static GlobalReadingStats loadLocalStats(bool* newHistory = nullptr) {
     return {};
   }
   LOG_DBG("GSTATS", "No global stats yet, starting fresh");
-  if (newHistory) *newHistory = true;
   stats.counterId = StatsCounterId::create();
   return stats;
 }
@@ -635,6 +626,58 @@ struct ArticleTransfer {
   }
 };
 
+// An unreadable slot could hold newer totals. Decode each successfully read
+// snapshot directly, retaining the newest valid one without reopening its file.
+bool readGlobalForArticleEdit(GlobalReadingStats& stats, bool* newHistory = nullptr) {
+  if (newHistory) *newHistory = false;
+  const auto path = StatsStorage::localPath(GLOBAL_STATS_PATH);
+  if (s_blockDestructiveSave) return false;
+  if (path.empty() || Storage.exists((path + ".recovery").c_str())) {
+    s_blockDestructiveSave = true;
+    return false;
+  }
+  progress_record::Slot best;
+  bool present = false;
+  uint8_t data[two_slot::MAX_FILE_BYTES];
+  for (const auto& candidate : {path, path + ".bak"}) {
+    const auto slot = two_slot::readSlot("GSTATS", candidate.c_str(), GLOBAL_STATS_FILE_SIZE, data,
+                                         {GLOBAL_STATS_FILE_SIZE_V4, GLOBAL_STATS_FILE_SIZE_V3});
+    if (slot.ioError) return false;
+    if (!slot.present) {
+      if (!confirmedMissingFile(candidate.c_str())) return false;
+      continue;
+    }
+    present = true;
+    if (!slot.size) continue;
+    const auto format = classifyGlobalPayload(data[0], slot.size);
+    if (format == StatsLoadResult::NewerFormat) {
+      s_blockDestructiveSave = true;
+      LOG_ERR("GSTATS", "Cannot classify title with newer global history: %s", candidate.c_str());
+      return false;
+    }
+    if (format == StatsLoadResult::Ok && progress_record::newest(best, slot.slot) == progress_record::BACKUP) {
+      decodeGlobalPayload(data, slot.size, stats);
+      best = slot.slot;
+    }
+  }
+  if (best.kind != progress_record::SlotKind::Invalid) return true;
+  if (present) {
+    s_blockDestructiveSave = true;
+    LOG_ERR("GSTATS", "Cannot classify title with invalid global history");
+    return false;
+  }
+  if (!newHistory) return false;
+  stats = {};
+  stats.counterId = StatsCounterId::create();
+  *newHistory = true;
+  return true;
+}
+
+bool readExistingTransferBook(const std::string& cachePath, BookReadingStats& book) {
+  bool newHistory;
+  return BookReadingStats::loadForEdit(cachePath, book, nullptr, newHistory) && !newHistory;
+}
+
 bool reconcileArticleTransfer(const std::string& globalPath) {
   const std::string marker = globalPath + ".article";
   if (!Storage.exists(marker.c_str())) return true;  // An unpublished .tmp precedes both snapshot writes.
@@ -642,7 +685,7 @@ bool reconcileArticleTransfer(const std::string& globalPath) {
   std::string cachePath;
   BookReadingStats book;
   GlobalReadingStats global;
-  if (!txn.read(marker, cachePath) || !BookReadingStats::loadForUpload(cachePath, book) || !readLocalHistory(global) ||
+  if (!txn.read(marker, cachePath) || !readExistingTransferBook(cachePath, book) || !readGlobalForArticleEdit(global) ||
       book.counterId.bytes != txn.bookId.bytes || global.counterId.bytes != txn.globalId.bytes ||
       (!txn.before.matches(global) && !txn.after.matches(global))) {
     LOG_ERR("GSTATS", "Cannot verify pending article transfer; preserving both histories");
@@ -677,8 +720,8 @@ bool GlobalReadingStats::toggleArticle(const std::string& cachePath, bool& artic
   BookReadingStats book;
   bool newBook, newGlobal;
   if (!BookReadingStats::loadForEdit(cachePath, book, live ? &live->counterId : nullptr, newBook)) return false;
-  GlobalReadingStats global = loadLocalStats(&newGlobal);
-  if (recoveryRequired()) return false;
+  GlobalReadingStats global;
+  if (!readGlobalForArticleEdit(global, &newGlobal)) return false;
   const bool desired = !book.isArticle;
   const bool hadArticles = global.hasArticles();
   // The first mark can precede both histories. Publish their original identities and categories
@@ -707,7 +750,7 @@ bool GlobalReadingStats::toggleArticle(const std::string& cachePath, bool& artic
     }
     if (!global.saveSnapshot()) {
       // A sync/close error can still leave a complete, checksummed slot.
-      if (!readLocalHistory(global) || !txn.after.matches(global) || global.hasArticles() != txn.marked(true) ||
+      if (!readGlobalForArticleEdit(global) || !txn.after.matches(global) || global.hasArticles() != txn.marked(true) ||
           global.counterId.bytes != txn.globalId.bytes) {
         recoverArticleTransfer();
         return false;
@@ -715,7 +758,7 @@ bool GlobalReadingStats::toggleArticle(const std::string& cachePath, bool& artic
     }
   }
 
-  if (!book.save(cachePath) && (!BookReadingStats::loadForUpload(cachePath, book) || book.isArticle != desired)) {
+  if (!book.save(cachePath) && (!readExistingTransferBook(cachePath, book) || book.isArticle != desired)) {
     if (updateGlobal) recoverArticleTransfer();
     return false;
   }
