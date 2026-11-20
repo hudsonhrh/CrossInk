@@ -111,6 +111,24 @@ constexpr uint32_t HEADER_SIZE = sizeof(uint8_t) + sizeof(int) + sizeof(float) +
                                  sizeof(uint8_t) + sizeof(bool) + sizeof(uint32_t) + sizeof(uint32_t) +
                                  sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(int8_t) +
                                  sizeof(uint8_t) + sizeof(uint8_t);
+
+// Both tables store one index per page. Scan in file order so ties keep their first page.
+std::optional<uint16_t> findPageInPositionIndex(HalFile& file, const uint16_t count, const uint16_t target) {
+  constexpr uint32_t BATCH_SIZE = 32;
+  uint16_t indexes[BATCH_SIZE];
+  for (uint32_t first = 0; first < count; first += BATCH_SIZE) {
+    const uint32_t entries = std::min<uint32_t>(BATCH_SIZE, count - first);
+    const size_t bytes = entries * sizeof(indexes[0]);
+    if (file.read(indexes, bytes) != static_cast<int>(bytes)) {
+      LOG_ERR("SCT", "Failed to read section position index");
+      return std::nullopt;
+    }
+    for (uint32_t i = 0; i < entries; ++i) {
+      if (indexes[i] >= target) return static_cast<uint16_t>(first + i);
+    }
+  }
+  return count - 1;
+}
 }  // namespace
 
 // Out-of-line so the unique_ptr<ChapterHtmlSlimParser> in BuildContext can be
@@ -1024,37 +1042,21 @@ std::optional<uint16_t> Section::getPageForParagraphIndex(const uint16_t pIndex)
     return std::nullopt;
   }
 
-  const uint32_t fileSize = f.size();
-  f.seek(HEADER_SIZE - sizeof(uint32_t) * 3);
+  const size_t fileSize = f.size();
   uint32_t paragraphLutOffset;
-  serialization::readPod(f, paragraphLutOffset);
-  if (paragraphLutOffset == 0 || paragraphLutOffset >= fileSize) {
-    return std::nullopt;
-  }
-
-  f.seek(paragraphLutOffset);
   uint16_t count;
-  serialization::readPod(f, count);
-  if (count == 0) {
+  if (!f.seek(HEADER_SIZE - sizeof(uint32_t) * 3) || !serialization::tryReadPod(f, paragraphLutOffset) ||
+      paragraphLutOffset < HEADER_SIZE || paragraphLutOffset >= fileSize) {
+    LOG_ERR("SCT", "Invalid paragraph index offset");
+    return std::nullopt;
+  }
+  if (!f.seek(paragraphLutOffset) || !serialization::tryReadPod(f, count) || count == 0 ||
+      sizeof(count) + count * sizeof(uint16_t) > fileSize - paragraphLutOffset) {
+    LOG_ERR("SCT", "Invalid paragraph index size");
     return std::nullopt;
   }
 
-  const uint32_t lutEnd = paragraphLutOffset + sizeof(uint16_t) + count * sizeof(uint16_t);
-  if (lutEnd > fileSize) {
-    return std::nullopt;
-  }
-
-  uint16_t resultPage = count - 1;
-  for (uint16_t i = 0; i < count; i++) {
-    uint16_t pagePIdx;
-    serialization::readPod(f, pagePIdx);
-    if (pagePIdx >= pIndex) {
-      resultPage = i;
-      break;
-    }
-  }
-
-  return resultPage;
+  return findPageInPositionIndex(f, count, pIndex);
 }
 
 std::optional<uint16_t> Section::getParagraphIndexForPage(const uint16_t page) const {
@@ -1095,46 +1097,28 @@ std::optional<uint16_t> Section::getPageForListItemIndex(const uint16_t liIndex)
     return std::nullopt;
   }
 
-  const uint32_t fileSize = f.size();
-  f.seek(HEADER_SIZE - sizeof(uint32_t) * 2);
-  uint32_t liLutOffset;
-  serialization::readPod(f, liLutOffset);
-  if (liLutOffset == 0 || liLutOffset >= fileSize) {
+  const size_t fileSize = f.size();
+  // The header stores these offsets consecutively. Both tables share the paragraph count.
+  uint32_t offsets[2];
+  if (!f.seek(HEADER_SIZE - sizeof(uint32_t) * 3) || f.read(offsets, sizeof(offsets)) != sizeof(offsets)) {
+    LOG_ERR("SCT", "Failed to read section index offsets");
     return std::nullopt;
   }
-
-  // The li LUT shares count with the paragraph LUT; read count from paragraphLutOffset
-  f.seek(HEADER_SIZE - sizeof(uint32_t) * 3);
-  uint32_t paragraphLutOffset;
-  serialization::readPod(f, paragraphLutOffset);
-  if (paragraphLutOffset == 0 || paragraphLutOffset >= fileSize) {
-    return std::nullopt;
-  }
-
-  f.seek(paragraphLutOffset);
+  const uint32_t paragraphLutOffset = offsets[0];
+  const uint32_t liLutOffset = offsets[1];
   uint16_t count;
-  serialization::readPod(f, count);
-  if (count == 0) {
+  if (paragraphLutOffset < HEADER_SIZE || paragraphLutOffset >= fileSize || !f.seek(paragraphLutOffset) ||
+      !serialization::tryReadPod(f, count) || count == 0) {
+    LOG_ERR("SCT", "Invalid list-item index count");
+    return std::nullopt;
+  }
+  if (liLutOffset < HEADER_SIZE || liLutOffset >= fileSize || count * sizeof(uint16_t) > fileSize - liLutOffset ||
+      !f.seek(liLutOffset)) {
+    LOG_ERR("SCT", "Invalid list-item index");
     return std::nullopt;
   }
 
-  const uint32_t lutEnd = liLutOffset + count * sizeof(uint16_t);
-  if (lutEnd > fileSize) {
-    return std::nullopt;
-  }
-
-  f.seek(liLutOffset);
-  uint16_t resultPage = count - 1;
-  for (uint16_t i = 0; i < count; i++) {
-    uint16_t pageLiIdx;
-    serialization::readPod(f, pageLiIdx);
-    if (pageLiIdx >= liIndex) {
-      resultPage = i;
-      break;
-    }
-  }
-
-  return resultPage;
+  return findPageInPositionIndex(f, count, liIndex);
 }
 
 std::optional<uint32_t> Section::getVisibleTextOffsetForPage(const uint16_t page) const {
