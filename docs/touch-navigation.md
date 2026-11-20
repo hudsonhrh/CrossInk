@@ -34,6 +34,10 @@ swipe on the main part of the Home screen. You do not need to start at the edge.
 | Swipe **left**  | Shows the next recent book |
 | Tap the book cover | Opens the book |
 
+On X4 Pro, tap **Last 30 days** at the bottom of Dashboard Home to open **Device Activity**. The small grid runs left to right across each row, with today at the bottom right. The six-month calendar groups days into weeks, with Monday at the top of each column. Both grids show reading time recorded on this reader. **Settings → System → Reading Stats → Show Reading Heatmap** controls the Dashboard grid and the Device Activity page. Turning it off restores the original footer and keeps recording reading time while **Track Reading Stats** is on.
+
+An empty square means no recorded time. The standard scale gets darker at 15, 45, and 90 minutes. If you read for at least 90 minutes on six of the previous 29 days, the cutoffs rise to 30, 90, and 180 minutes. The Dashboard and both charts use the same cutoffs, shown in the Device Activity legend. When the scale changes, earlier squares are shaded again using their original reading times.
+
 The **Lyra** Home screen has one swipe: swipe **left** to show the next recent
 book. Use the on-screen menu for everything else.
 

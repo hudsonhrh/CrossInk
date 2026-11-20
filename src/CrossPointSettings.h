@@ -742,6 +742,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t quickResumeSleepScreen = QUICK_RESUME_NEVER;
   // Master switch for automatic reading statistics; Time Left pace remains independent.
   uint8_t trackReadingStats = 1;
+  uint8_t showReadingHeatmap = 1;
   uint8_t readingStatsCategoryLabel = DEFAULT_READING_STATS_CATEGORY_LABEL;
 
   ~CrossPointSettings() = default;
@@ -790,6 +791,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   }
 
   bool shouldTrackReadingStats() const { return trackReadingStats != 0; }
+  bool shouldShowReadingHeatmap() const;
   bool usesShortReadsLabel() const { return readingStatsCategoryLabel == STATS_LABEL_SHORT_READS; }
   static const char* getDefaultDeviceName();
   const char* getEffectiveDeviceName() const;

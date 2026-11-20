@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "AppCapabilities.h"
 #include "ClippingsUpload.h"
 #include "CrossPointSettings.h"
 #include "activities/reader/BookStatsTracking.h"
@@ -210,7 +211,9 @@ StatsUploadClient::Result ReadingSyncUpload::globalStats(StatsUploadClient& clie
   if (!complete) LOG_ERR("ReadingSync", "Daily counter upload incomplete");
   if (complete) {
     ReadingStatsDateTime local;
-    if (getCurrentLocalDailyReadingDateTime(local) && !DailyReadingStats::pruneSyncedMonths(local.date))
+    constexpr uint8_t priorMonthsToKeep = CROSSINK_APP_READING_HEATMAP ? 6 : 1;
+    if (getCurrentLocalDailyReadingDateTime(local) &&
+        !DailyReadingStats::pruneSyncedMonths(local.date, priorMonthsToKeep))
       LOG_ERR("ReadingSync", "Synced monthly history cleanup deferred");
   }
   if (result != Result::Ok) return globalOutcome(result, GlobalStatsStep::Daily, failedStep);

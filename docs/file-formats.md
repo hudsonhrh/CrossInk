@@ -1987,8 +1987,9 @@ buffer plus small serialized chunks, with no new heap allocation or retained
 history buffer. The sync payload and server API are unchanged.
 
 After successful daily stats sync, the reader removes fully acknowledged months
-older than the previous calendar month. Current, previous, and future months stay,
-as does any month with unuploaded seconds. Cleanup requires a valid local date,
+older than the previous calendar month. X4 Pro retains the current and six preceding
+months for its rolling six-month heatmap. All readers keep future months and any
+month with unuploaded seconds. Cleanup requires a valid local date,
 flushes accepted in-memory time first, and validates every existing snapshot;
 corrupt, unknown, or unreadable data is retained. The newest acknowledgments must
 cover every total in either snapshot. Older snapshots are deleted first so an

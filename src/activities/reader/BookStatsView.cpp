@@ -9,9 +9,11 @@
 #include <array>
 #include <cstdio>
 
+#include "AppCapabilities.h"
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "components/CompactHeader.h"
+#include "components/ReadingHeatmap.h"
 #include "components/TouchActionButtons.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/TouchRegistry.h"
@@ -729,6 +731,176 @@ void renderGlobalStatsPage(GfxRenderer& renderer, const MappedInputManager* mapp
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
   }
 }
+
+#if CROSSINK_APP_READING_HEATMAP
+namespace {
+void drawPeriodHeading(const GfxRenderer& renderer, const Rect& area, const char* title, const ReadingStatsDate& start,
+                       const ReadingStatsDate& end) {
+  char first[16], last[16], range[40];
+  formatReadingStatsShortDate(start, first, sizeof(first));
+  formatReadingStatsShortDate(end, last, sizeof(last));
+  snprintf(range, sizeof(range), "%s – %s", first, last);
+  const int rangeW = renderer.getTextWidth(SMALL_FONT_ID, range);
+  const int baseline = area.y + renderer.getFontAscenderSize(UI_12_FONT_ID);
+  const auto visible = renderer.truncatedText(UI_12_FONT_ID, title, area.width - rangeW - 12, EpdFontFamily::BOLD);
+  renderer.drawText(UI_12_FONT_ID, area.x, area.y, visible.c_str(), true, EpdFontFamily::BOLD);
+  renderer.drawText(SMALL_FONT_ID, area.x + area.width - rangeW, baseline - renderer.getFontAscenderSize(SMALL_FONT_ID),
+                    range);
+}
+
+void drawPeriodSummary(const GfxRenderer& renderer, const Rect& area, const uint32_t* seconds, const size_t count) {
+  const auto summary = DailyReadingStats::summarizeWindow(seconds, count);
+  const StatGrid grid{area.x, area.y, area.width / 3, area.height, 3};
+  char buf[24];
+  ReadingHeatmap::formatDuration(summary.totalSeconds, buf, sizeof(buf));
+  grid.draw(renderer, 0, buf, tr(STR_STATS_TIME_LBL));
+  snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(summary.activeDays));
+  grid.draw(renderer, 1, buf, tr(STR_STATS_ACTIVE_DAYS));
+  ReadingHeatmap::formatDuration(summary.peakSeconds, buf, sizeof(buf));
+  grid.draw(renderer, 2, buf, tr(STR_STATS_BEST_DAY));
+}
+
+void drawThirtyDayGrid(const GfxRenderer& renderer, const Rect& area, ReadingStatsDate start, const uint32_t* seconds,
+                       const ReadingHeatmap::Scale scale) {
+  constexpr int gap = 4;
+  char dates[ReadingHeatmap::MonthRows][16];
+  int labelW = 0;
+  for (auto& date : dates) {
+    formatReadingStatsShortDate(start, date, sizeof(date));
+    labelW = std::max(labelW, renderer.getTextWidth(SMALL_FONT_ID, date));
+    addDaysToReadingStatsDate(start, ReadingHeatmap::MonthColumns);
+  }
+  labelW += 10;
+  const int size = std::max(1, std::min((area.width - labelW + gap) / ReadingHeatmap::MonthColumns - gap,
+                                        (area.height + gap) / ReadingHeatmap::MonthRows - gap));
+  const int gridW = ReadingHeatmap::MonthColumns * (size + gap) - gap;
+  const int gridH = ReadingHeatmap::MonthRows * (size + gap) - gap;
+  const int x = area.x + (area.width - labelW - gridW) / 2;
+  const int y = area.y + (area.height - gridH) / 2;
+  for (int row = 0; row < ReadingHeatmap::MonthRows; ++row) {
+    renderer.drawText(SMALL_FONT_ID, x, y + row * (size + gap) + (size - renderer.getLineHeight(SMALL_FONT_ID)) / 2,
+                      dates[row]);
+  }
+  ReadingHeatmap::drawMonth(renderer, x + labelW, y, size, gap, seconds, scale);
+}
+
+void drawCalendarGrid(const GfxRenderer& renderer, const Rect& area, ReadingStatsDate day, const uint32_t* seconds,
+                      const size_t count, const ReadingHeatmap::Scale scale) {
+  constexpr int gap = 3;
+  const int textH = renderer.getLineHeight(SMALL_FONT_ID);
+  const int startRow = readingStatsDayOfWeekIndex(day);
+  const int weeks = (static_cast<int>(count) + startRow + 6) / 7;
+  int labelW = 0;
+  for (int row : {0, 3, 6}) {
+    labelW = std::max(labelW, renderer.getTextWidth(SMALL_FONT_ID, I18N.get(DAY_LABELS[row])));
+  }
+  labelW += 8;
+  const int step = std::max(gap + 1, std::min((area.width - labelW + gap) / weeks, (area.height - textH) / 7));
+  const int size = step - gap;
+  const int x = area.x + (area.width - labelW - weeks * step + gap) / 2;
+  const int y = area.y + (area.height - textH - 7 * step) / 2 + textH + gap;
+  for (int row : {0, 3, 6}) {
+    renderer.drawText(SMALL_FONT_ID, x, y + row * step + (size - textH) / 2, I18N.get(DAY_LABELS[row]));
+  }
+  const int gridX = x + labelW;
+  int nextLabelX = gridX;
+  for (size_t i = 0; i < count; ++i) {
+    const int slot = startRow + static_cast<int>(i);
+    const int cellX = gridX + (slot / 7) * step;
+    ReadingHeatmap::drawCell(renderer, cellX, y + (slot % 7) * step, size,
+                             ReadingHeatmap::levelForSeconds(seconds[i], scale));
+    if (i == 0 || day.day == 1) {
+      char label[12];
+      formatReadingStatsMonthToken(day, label, sizeof(label));
+      const int width = renderer.getTextWidth(SMALL_FONT_ID, label);
+      // A short opening month can share a week with the next one. Its date is
+      // already in the heading, so give the next month its full label.
+      const int nextMonthWeek = (slot + daysInMonth(day.year, day.month) - day.day + 1) / 7;
+      const bool fitsPartialMonth = i != 0 || day.day == 1 || cellX + width + gap <= gridX + nextMonthWeek * step;
+      if (fitsPartialMonth && cellX >= nextLabelX && cellX + width <= area.x + area.width) {
+        renderer.drawText(SMALL_FONT_ID, cellX, y - textH - gap, label);
+        nextLabelX = cellX + width + gap;
+      }
+    }
+    addDaysToReadingStatsDate(day, 1);
+  }
+}
+
+void drawHeatmapLegend(const GfxRenderer& renderer, const Rect& area, const ReadingHeatmap::Scale scale) {
+  constexpr int swatch = 12;
+  constexpr int textGap = 4;
+  const unsigned low = ReadingHeatmap::thresholdMinutes(scale, 0);
+  const unsigned mid = ReadingHeatmap::thresholdMinutes(scale, 1);
+  const unsigned high = ReadingHeatmap::thresholdMinutes(scale, 2);
+  char ranges[5][20];
+  snprintf(ranges[0], sizeof(ranges[0]), "%s", tr(STR_STATS_ZERO_MINUTES));
+  snprintf(ranges[1], sizeof(ranges[1]), tr(STR_STATS_LESS_THAN_FORMAT), low);
+  snprintf(ranges[2], sizeof(ranges[2]), tr(STR_STATS_RANGE_FORMAT), low, mid - 1);
+  snprintf(ranges[3], sizeof(ranges[3]), tr(STR_STATS_RANGE_FORMAT), mid, high - 1);
+  snprintf(ranges[4], sizeof(ranges[4]), tr(STR_STATS_OR_MORE_FORMAT), high);
+
+  const int lineH = renderer.getLineHeight(SMALL_FONT_ID);
+  // Space the groups by their actual widths. The extended ranges need more room than a single zero.
+  int groupW[5];
+  int totalW = 0;
+  for (int i = 0; i < 5; ++i) {
+    groupW[i] = swatch + textGap + renderer.getTextWidth(SMALL_FONT_ID, ranges[i]);
+    totalW += groupW[i];
+  }
+  const int freeW = std::max(0, area.width - totalW);
+  const int y = area.y + (area.height - lineH) / 2;
+  int occupied = 0;
+  for (int level = 0; level < 5; ++level) {
+    const int x = area.x + occupied + level * freeW / 4;
+    ReadingHeatmap::drawCell(renderer, x, y + (lineH - swatch) / 2, swatch, level);
+    renderer.drawText(SMALL_FONT_ID, x + swatch + textGap, y, ranges[level]);
+    occupied += groupW[level];
+  }
+}
+}  // namespace
+
+void renderHeatmapStatsPage(GfxRenderer& renderer, const MappedInputManager& mappedInput, const ReadingStatsDate& today,
+                            const uint32_t* seconds, const size_t count) {
+  renderer.clearScreen();
+  drawStatsHeader(renderer, &mappedInput, tr(STR_STATS_DEVICE_ACTIVITY), true);
+  const auto safe = statsSafeArea(renderer, true);
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int x = safe.x + metrics.contentSidePadding;
+  const int width = safe.width - 2 * metrics.contentSidePadding;
+  const int top = CompactHeader::contentTop(renderer) + 12;
+  const int bottom = safe.y + safe.height - metrics.verticalSpacing - kPageIndicatorClearance;
+  if (count < ReadingHeatmap::MonthDays) {
+    drawCenteredLabel(renderer, UI_10_FONT_ID, x, width, (top + bottom) / 2, tr(STR_STATS_HISTORY_UNAVAILABLE));
+  } else {
+    const auto scale = ReadingHeatmap::scaleForMonth(seconds, count);
+    const int legendH = renderer.getLineHeight(SMALL_FONT_ID) + 6;
+    const int headingH = renderer.getLineHeight(UI_12_FONT_ID) + 8;
+    const int summaryH = renderer.getLineHeight(UI_12_FONT_ID) + renderer.getLineHeight(SMALL_FONT_ID) + 12;
+    const int periodH = (bottom - top - legendH - 28) / 2;
+    for (int period = 0; period < 2; ++period) {
+      const bool recent = period == 0;
+      const size_t days = recent ? ReadingHeatmap::MonthDays : count;
+      const uint32_t* values = seconds + count - days;
+      ReadingStatsDate first = today;
+      addDaysToReadingStatsDate(first, 1 - static_cast<int>(days));
+      const int y = top + period * (periodH + 20);
+      drawPeriodHeading(renderer, Rect(x, y, width, headingH),
+                        recent ? tr(STR_STATS_LAST_30_DAYS) : tr(STR_STATS_LAST_SIX_MONTHS), first, today);
+      const Rect grid(x, y + headingH, width, periodH - headingH - summaryH);
+      if (recent)
+        drawThirtyDayGrid(renderer, grid, first, values, scale);
+      else
+        drawCalendarGrid(renderer, grid, first, values, days, scale);
+      drawPeriodSummary(renderer, Rect(x, y + periodH - summaryH, width, summaryH), values, days);
+      if (recent) renderer.drawLine(x, y + periodH + 9, x + width - 1, y + periodH + 9);
+    }
+    drawHeatmapLegend(renderer, Rect(x, bottom - legendH, width, legendH), scale);
+  }
+  const auto labels =
+      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_EXIT)), "", mappedInput.withBackArrow(tr(STR_BACK)), "");
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
+}
+#endif
 
 void renderNoRtcCombinedStatsPage(GfxRenderer& renderer, const MappedInputManager* mappedInput,
                                   const std::string& bookTitle, const BookReadingStats& bookStats,

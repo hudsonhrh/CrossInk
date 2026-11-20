@@ -94,6 +94,27 @@ void BookStatsActivity::loadDailySummary() {
   dailySummary = DailyReadingStats::summarize(readingStatsDayIndex(now.date));
 }
 
+#if CROSSINK_APP_READING_HEATMAP
+void BookStatsActivity::loadHistory() {
+  ReadingStatsDateTime now;
+  if (!getCurrentLocalDailyReadingDateTime(now)) {
+    historyDays = 0;
+    return;
+  }
+  if (historyDays && compareReadingStatsDate(now.date, historyToday) == 0) return;
+  historyToday = now.date;
+  const size_t count = DailyReadingStats::sixMonthDayCount(now.date);
+  historyDays = count && DailyReadingStats::loadWindow(now.date, historySeconds, count) ? count : 0;
+}
+
+void BookStatsActivity::onFrontlightPanelClosed() {
+  if (page == Page::History && !SETTINGS.shouldShowReadingHeatmap()) {
+    page = showAllDevicesStats ? Page::AllDevices : Page::ThisDevice;
+  }
+  requestUpdate();
+}
+#endif
+
 void BookStatsActivity::saveStats() {
   if (!didChangeStats || !hasEditableBook()) {
     return;
@@ -301,7 +322,10 @@ void BookStatsActivity::onEnter() {
   ignoreInitialBackRelease = mappedInput.isPressed(MappedInputManager::Button::Back);
   ignoreInitialConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
   ignoreInitialPowerRelease = mappedInput.isPressed(MappedInputManager::Button::Power);
-  if (bookCachePath.empty()) page = Page::ThisDevice;
+  if (bookCachePath.empty() && page == Page::PerBook) page = Page::ThisDevice;
+#if CROSSINK_APP_READING_HEATMAP
+  if (page == Page::History) loadHistory();
+#endif
   loadDailySummary();
   previousOrientation = renderer.getOrientation();
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
@@ -336,10 +360,25 @@ bool BookStatsActivity::showNextStatsPage() {
     return true;
   }
 
+#if CROSSINK_APP_READING_HEATMAP
+  if (SETTINGS.shouldShowReadingHeatmap() && (page == Page::ThisDevice || page == Page::AllDevices)) {
+    loadHistory();
+    page = Page::History;
+    requestUpdate();
+    return true;
+  }
+#endif
   return false;
 }
 
 bool BookStatsActivity::showPreviousStatsPage() {
+#if CROSSINK_APP_READING_HEATMAP
+  if (page == Page::History) {
+    page = showAllDevicesStats ? Page::AllDevices : Page::ThisDevice;
+    requestUpdate();
+    return true;
+  }
+#endif
   if (page == Page::AllDevices) {
     page = Page::ThisDevice;
     requestUpdate();
@@ -555,7 +594,7 @@ void BookStatsActivity::loop() {
     return;
   }
 
-  if (page == Page::ThisDevice && showAllDevicesStats && downOrRightPressed) {
+  if (downOrRightPressed) {
     showNextStatsPage();
   }
 }
@@ -576,17 +615,25 @@ void BookStatsActivity::render(RenderLock&&) {
       break;
     case Page::ThisDevice:
       renderGlobalStatsPage(renderer, &mappedInput, tr(STR_STATS_THIS_DEVICE_SCREEN), globalStats, true,
-                            showAllDevicesStats, &dailySummary, canSyncReadingStats());
+                            showAllDevicesStats || SETTINGS.shouldShowReadingHeatmap(), &dailySummary,
+                            canSyncReadingStats());
       break;
     case Page::AllDevices:
-      renderGlobalStatsPage(renderer, &mappedInput, tr(STR_STATS_ALL_DEVICES_SCREEN), allDevicesStats, true, false);
+      renderGlobalStatsPage(renderer, &mappedInput, tr(STR_STATS_ALL_DEVICES_SCREEN), allDevicesStats, true,
+                            SETTINGS.shouldShowReadingHeatmap());
+      break;
+    case Page::History:
+#if CROSSINK_APP_READING_HEATMAP
+      renderHeatmapStatsPage(renderer, mappedInput, historyToday, historySeconds, historyDays);
+#endif
       break;
     case Page::EditDates:
       renderEditBookDatesPage(renderer, &mappedInput, bookTitle, stats, selectedEditField, true);
       break;
   }
   if (page != Page::EditDates) {
-    drawPageIndicators(renderer, static_cast<int>(page), showAllDevicesStats ? 3 : 2);
+    const int pages = (showAllDevicesStats ? 3 : 2) + SETTINGS.shouldShowReadingHeatmap();
+    drawPageIndicators(renderer, page == Page::History ? pages - 1 : static_cast<int>(page), pages);
   }
   renderer.displayBuffer();
 }

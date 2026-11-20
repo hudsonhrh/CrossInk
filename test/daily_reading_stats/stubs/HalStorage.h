@@ -23,6 +23,7 @@ struct HostFaults {
   size_t readErrorAfter = 0;
   bool shortRead = false;
   size_t writes = 0;
+  size_t readOpens = 0;
 };
 inline HostFaults faults;
 class HalFile : public Print {
@@ -131,6 +132,7 @@ class HalStorage {
     const auto it = files.find(path);
     if (it == files.end()) return false;
     file = HalFile(it->second, path);
+    ++faults.readOpens;
     return true;
   }
   bool openFileForWrite(const char*, const std::string& path, HalFile& file) {
