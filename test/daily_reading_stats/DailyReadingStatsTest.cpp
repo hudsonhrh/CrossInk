@@ -134,6 +134,26 @@ TEST_F(DailyReading, SummarizesTodayAndSevenCalendarDays) {
   EXPECT_FALSE(summary.hasToday);
   EXPECT_FALSE(summary.hasSevenDayAverage);
 }
+TEST_F(DailyReading, SevenDaySummaryLoadsEachMonthOnceAndKeepsTodayIfPriorMonthFails) {
+  const uint32_t today = readingStatsDayIndex({2026, 11, 3});
+  ASSERT_TRUE(write(today - 4, {140, 0}));
+  ASSERT_TRUE(write(today, {210, 0}));
+  ASSERT_TRUE(record(today, 7));
+  faults.readOpens = 0;
+  const auto summary = summarize(today);
+  EXPECT_TRUE(summary.hasToday);
+  EXPECT_TRUE(summary.hasSevenDayAverage);
+  EXPECT_EQ(summary.todaySeconds, 217u);
+  EXPECT_EQ(summary.sevenDayAverageSeconds, 51u);
+  // Two healthy slots per calendar month.
+  EXPECT_EQ(faults.readOpens, 4u);
+
+  faults.failReadPath = "/.crosspoint/daily_reading/2026-10.a.bin";
+  const auto partial = summarize(today);
+  EXPECT_TRUE(partial.hasToday);
+  EXPECT_EQ(partial.todaySeconds, 217u);
+  EXPECT_FALSE(partial.hasSevenDayAverage);
+}
 TEST_F(DailyReading, LocalOffsetAndDateValidation) {
   ReadingStatsDateTime out;
   SETTINGS.clockUtcOffsetQ = 47;
@@ -438,6 +458,16 @@ TEST_F(DailyReading, MonthlyCorruptionAndFutureVersionsNeverResetHistory) {
   EXPECT_FALSE(read(dayOf(1), c));
   EXPECT_FALSE(write(dayOf(1), {300, 0}));
 }
+TEST_F(DailyReading, TornInitialSlotDoesNotExposeUnverifiedCounters) {
+  ASSERT_TRUE(write(dayOf(1), {100, 10}));
+  ASSERT_TRUE(write(dayOf(1), {200, 20}));
+  Storage.remove(monthFile("2026-10", 'a').c_str());
+  Storage.files.at(monthFile("2026-10", 'b'))->bytes.back() ^= 1;
+  Counter c;
+  ASSERT_TRUE(read(dayOf(1), c));
+  EXPECT_EQ(c.seconds, 0u);
+  EXPECT_EQ(c.uploaded, 0u);
+}
 TEST_F(DailyReading, StorageFailuresPreserveExistingCheckpoint) {
   ASSERT_TRUE(write(dayOf(1), {100, 10}));
   faults.failOpenWrite = true;
@@ -732,8 +762,8 @@ TEST_F(DailyReading, UploadChecksEachSettledMonthOnceAndFlushesPendingTime) {
   reboot();
   auto refuse = [](void*, uint32_t, uint32_t) { return false; };
   ASSERT_TRUE(uploadPending(refuse, nullptr));
-  // One integrity check for each slot, then one read of the newest slot for each retained month.
-  EXPECT_EQ(faults.readOpens, 3u * 7);
+  // One integrity check for each slot of each retained month.
+  EXPECT_EQ(faults.readOpens, 2u * 7);
 
   ASSERT_TRUE(record(dateDay(2027, 7), 15));
   EXPECT_FALSE(uploadPending(refuse, nullptr));

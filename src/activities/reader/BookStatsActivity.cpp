@@ -26,8 +26,14 @@ void drawPageIndicators(const GfxRenderer& renderer, const int currentPage, cons
   constexpr int kDotSpacing = 6;
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int totalDotWidth = totalPages * kDotSize + (totalPages - 1) * kDotSpacing;
+#if CROSSINK_APP_READING_HEATMAP
+  const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int dotsStartX = safe.x + (safe.width - totalDotWidth) / 2;
+  const int dotY = safe.y + safe.height - metrics.verticalSpacing - kDotSize / 2;
+#else
   const int dotsStartX = (renderer.getScreenWidth() - totalDotWidth) / 2;
   const int dotY = renderer.getScreenHeight() - UITheme::getButtonHintsReserve(renderer) - metrics.verticalSpacing - 4;
+#endif
   for (int pageIndex = 0; pageIndex < totalPages; ++pageIndex) {
     const int dotX = dotsStartX + pageIndex * (kDotSize + kDotSpacing);
     if (pageIndex == currentPage) {

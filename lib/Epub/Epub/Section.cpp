@@ -12,6 +12,8 @@
 #include <PrintSerialization.h>
 #include <Serialization.h>
 
+#include <iterator>
+
 #include "Epub/ReferencePageNavigation.h"
 #include "Epub/css/CssParser.h"
 #include "Page.h"
@@ -134,6 +136,25 @@ bool promoteSectionCache(const std::string& tmpPath, const std::string& filePath
     LOG_ERR("SCT", "Failed to restore section cache backup");
   }
   return false;
+}
+
+// Paragraph and list-item lookups return the first matching page, or the last
+// page if the requested index lies past the table. Scan in file order so that
+// repeated indexes and any out-of-order entries retain the same result.
+std::optional<uint16_t> findPageInIndex(FsFile& file, const uint16_t count, const uint16_t target) {
+  uint16_t indexes[32];
+  for (uint32_t first = 0; first < count; first += std::size(indexes)) {
+    const uint32_t batch = std::min<uint32_t>(std::size(indexes), count - first);
+    const size_t bytes = batch * sizeof(indexes[0]);
+    if (file.read(indexes, bytes) != static_cast<int>(bytes)) {
+      LOG_ERR("SCT", "Failed to read section position index");
+      return std::nullopt;
+    }
+    for (uint32_t i = 0; i < batch; ++i) {
+      if (indexes[i] >= target) return static_cast<uint16_t>(first + i);
+    }
+  }
+  return count - 1;
 }
 }  // namespace
 
@@ -1664,6 +1685,7 @@ std::optional<uint16_t> Section::getPageForParagraphIndex(const uint16_t pIndex)
     return std::nullopt;
   }
 
+  const ScopedCleanup closeFile{[&f] { f.close(); }};
   const uint32_t fileSize = f.size();
   if (!f.seek(HEADER_SIZE - sizeof(uint32_t) * 3)) {
     return std::nullopt;
@@ -1687,24 +1709,12 @@ std::optional<uint16_t> Section::getPageForParagraphIndex(const uint16_t pIndex)
     return std::nullopt;
   }
 
-  const uint32_t lutEnd = paragraphLutOffset + sizeof(uint16_t) + count * sizeof(uint16_t);
-  if (lutEnd > fileSize) {
+  const size_t tableBytes = sizeof(uint16_t) + count * sizeof(uint16_t);
+  if (tableBytes > fileSize - paragraphLutOffset) {
     return std::nullopt;
   }
 
-  uint16_t resultPage = count - 1;
-  for (uint16_t i = 0; i < count; i++) {
-    uint16_t pagePIdx;
-    if (!serialization::tryReadPod(f, pagePIdx)) {
-      return std::nullopt;
-    }
-    if (pagePIdx >= pIndex) {
-      resultPage = i;
-      break;
-    }
-  }
-
-  return resultPage;
+  return findPageInIndex(f, count, pIndex);
 }
 
 std::optional<uint16_t> Section::findParagraphDuringBuild(const uint16_t pIndex) const {
@@ -1892,6 +1902,7 @@ std::optional<uint16_t> Section::getPageForListItemIndex(const uint16_t liIndex)
     return std::nullopt;
   }
 
+  const ScopedCleanup closeFile{[&f] { f.close(); }};
   const uint32_t fileSize = f.size();
   if (!f.seek(HEADER_SIZE - sizeof(uint32_t) * 2)) {
     return std::nullopt;
@@ -1927,27 +1938,15 @@ std::optional<uint16_t> Section::getPageForListItemIndex(const uint16_t liIndex)
     return std::nullopt;
   }
 
-  const uint32_t lutEnd = liLutOffset + count * sizeof(uint16_t);
-  if (lutEnd > fileSize) {
+  const size_t tableBytes = count * sizeof(uint16_t);
+  if (tableBytes > fileSize - liLutOffset) {
     return std::nullopt;
   }
 
   if (!f.seek(liLutOffset)) {
     return std::nullopt;
   }
-  uint16_t resultPage = count - 1;
-  for (uint16_t i = 0; i < count; i++) {
-    uint16_t pageLiIdx;
-    if (!serialization::tryReadPod(f, pageLiIdx)) {
-      return std::nullopt;
-    }
-    if (pageLiIdx >= liIndex) {
-      resultPage = i;
-      break;
-    }
-  }
-
-  return resultPage;
+  return findPageInIndex(f, count, liIndex);
 }
 
 std::optional<uint32_t> Section::getVisibleTextOffsetForPage(const uint16_t page) const {

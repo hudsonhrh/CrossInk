@@ -595,7 +595,7 @@ TEST(ClippingTextMatcher, PreservesCompleteShortClippingsAndLongerRelayoutRuns) 
   EXPECT_FALSE(ClippingTextMatcher::isReliableRun(0, false, 0, 3));
 }
 
-TEST(ClipTextBuilder, BudgetsTheCompleteSelectionAndTemporaryWords) {
+TEST(ClipTextBuilder, BudgetsTheCompleteSelection) {
   ClipWordStore store;
   WordRef first;
   first.tableSelection = 1;
@@ -608,10 +608,9 @@ TEST(ClipTextBuilder, BudgetsTheCompleteSelectionAndTemporaryWords) {
   const uint16_t order[] = {0, 1};
   const auto budget = ClipTextBuilder::allocationBudget(store, order, 0, 1);
   EXPECT_EQ(budget.textCapacity, 13);
-  EXPECT_EQ(budget.temporaryBytes, 28);
   EXPECT_FALSE(budget.fits(100000, 13));
-  EXPECT_FALSE(budget.fits(1065, 100000));
-  EXPECT_TRUE(budget.fits(1066, 14));
+  EXPECT_FALSE(budget.fits(1037, 100000));
+  EXPECT_TRUE(budget.fits(1038, 14));
   EXPECT_EQ(ClipTextBuilder::allocationBudget(store, order, 0, 1, 1).textCapacity, 6);
   EXPECT_LE(ClipTextBuilder::build(store, order, 0, 1, 0, 1).text.size(), budget.textCapacity);
 }
@@ -665,4 +664,20 @@ TEST(ClipTextBuilder, AmbiguousNormalizedSubwordsCannotMigrateToTheirWholeOuterW
   EXPECT_EQ(result.text, "after");
   EXPECT_EQ(result.sourceStart, UINT32_MAX);
   EXPECT_EQ(result.sourceEnd, 0U);
+}
+
+TEST(ClipTextBuilder, SubwordEndingAtAnAuthoredHyphenKeepsItWhenTheLayoutHyphenIsOutsideTheSelection) {
+  ClipWordStore store;
+  WordRef word;
+  word.sourceStart = 90;
+  word.sourceEnd = 98;
+  word.endsWithInsertedHyphen = true;
+  ASSERT_TRUE(store.appendText(word, "well-kno-"));
+  store.words.push_back(word);
+  const uint16_t order[] = {0};
+  const ClipTextBuilder::SelectionBounds bounds{0, 0, 0, 0, 0, 5};
+  const auto result = ClipTextBuilder::build(store, order, 0, 0, 0, 1, &bounds);
+  EXPECT_EQ(result.text, "well-");
+  EXPECT_EQ(result.sourceStart, 90U);
+  EXPECT_EQ(result.sourceEnd, 95U);
 }

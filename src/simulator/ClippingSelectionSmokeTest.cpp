@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string_view>
 #include <tuple>
 
@@ -39,7 +40,8 @@ void capture(const char* name) {
   const auto path = std::filesystem::path(directory) / (std::string(name) + ".pgm");
   FILE* output = std::fopen(path.c_str(), "wb");
   require(output, "Cannot create screenshot");
-  RenderLock lock;
+  std::optional<RenderLock> lock;
+  if (!RenderLock::heldByCurrentTask()) lock.emplace();
   const int width = renderer.getScreenWidth(), height = renderer.getScreenHeight();
   std::fprintf(output, "P5\n%d %d\n255\n", width, height);
   for (int y = 0; y < height; ++y)
@@ -299,6 +301,9 @@ void ClippingSelectionSmokeTest::verifyStableHighlightAnchoring(EpubReaderActivi
 }
 
 void ClippingSelectionSmokeTest::verifySavedHighlightSpacing(EpubReaderActivity& reader) {
+  // A pending reader redraw can bind the synthetic word ordinals to the real page.
+  // Keep this clipping private to the fixture until it has been removed.
+  RenderLock lock;
   const auto oldSpacing = SETTINGS.lineHeightPercent;
   const int fontId = SETTINGS.getReaderFontId();
   const int fontHeight = renderer.getLineHeight(fontId);
@@ -314,7 +319,6 @@ void ClippingSelectionSmokeTest::verifySavedHighlightSpacing(EpubReaderActivity&
     for (const bool explicitHeight : {false, true}) {
       size_t erasedPixels = 0;
       {
-        RenderLock lock;
         SETTINGS.lineHeightPercent = spacing;
         const int lineHeight = std::max(1, (fontHeight * spacing + 50) / 100);
         Page page;
@@ -364,6 +368,7 @@ void ClippingSelectionSmokeTest::verifySavedHighlightSpacing(EpubReaderActivity&
   }
   require(CLIPPINGS.removeClippingAt(clippingIndex), "Could not remove highlight test range");
   SETTINGS.lineHeightPercent = oldSpacing;
+  lock.unlock();
   reader.requestUpdate();
 }
 

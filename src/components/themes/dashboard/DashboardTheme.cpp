@@ -78,7 +78,8 @@ struct DashboardLayout {
 Rect footerForContent(const GfxRenderer& renderer, const Rect& content) {
   const int bottom = content.y + content.height;
 #if CROSSINK_APP_READING_HEATMAP
-  if (SETTINGS.shouldShowReadingHeatmap()) {
+  // The saved layout determines thumbnail dimensions even while tracking is paused.
+  if (SETTINGS.showReadingHeatmap) {
     const int footerH = kHistoryTopPad + renderer.getLineHeight(UI_10_FONT_ID) + renderer.getLineHeight(UI_12_FONT_ID) +
                         renderer.getLineHeight(SMALL_FONT_ID);
     return Rect{content.x, std::max(content.y, bottom - footerH - 8), content.width, footerH};
@@ -430,18 +431,41 @@ void drawHistoryFooter(const GfxRenderer& renderer, const Rect& footer, const Da
   constexpr int gridGap = 3;
   constexpr int columns = ReadingHeatmap::MonthColumns;
   constexpr int rows = ReadingHeatmap::MonthRows;
-  const int cellWidth = (footer.width / 2 - (columns - 1) * gridGap) / columns;
+  char time[40];
+  ReadingHeatmap::formatDuration(history.totalSeconds, time, sizeof(time));
+  char streak[48];
+  if (history.streak > 0) {
+    snprintf(streak, sizeof(streak), tr(STR_STATS_DAY_STREAK_FORMAT), static_cast<unsigned>(history.streak));
+  } else {
+    snprintf(streak, sizeof(streak), "%s", tr(STR_STATS_NO_STREAK));
+  }
+
+  constexpr int columnGap = 12;
+  constexpr int chevronWidth = 15;
+  const char* heading = tr(STR_STATS_LAST_30_DAYS);
+  int mapWidth = footer.width / 2;
+  if (interactive) {
+    const int labelW = std::max({renderer.getTextWidth(UI_10_FONT_ID, heading) + chevronWidth,
+                                 renderer.getTextWidth(UI_12_FONT_ID, time, EpdFontFamily::BOLD),
+                                 renderer.getTextWidth(SMALL_FONT_ID, streak)});
+    mapWidth = std::clamp(footer.width - labelW - columnGap, mapWidth, footer.width * 2 / 3);
+  }
+  const int cellWidth = (mapWidth - (columns - 1) * gridGap) / columns;
   const int cellHeight = (footer.height - kHistoryTopPad - (rows - 1) * gridGap) / rows;
   const int size = std::max(1, std::min(cellWidth, cellHeight));
   const int gridW = size * columns + gridGap * (columns - 1);
   const int gridH = size * rows + gridGap * (rows - 1);
   const int gridX = footer.x + footer.width - gridW;
-  const int maxW = std::max(1, gridX - footer.x - 12);
-  const int contentY = footer.y + kHistoryTopPad;
+  const int maxW = std::max(1, gridX - footer.x - columnGap);
+  const int gridAreaY = footer.y + kHistoryTopPad;
+  const int gridAreaH = footer.height - kHistoryTopPad;
+  const int textH = renderer.getLineHeight(UI_10_FONT_ID) + renderer.getLineHeight(UI_12_FONT_ID) +
+                    renderer.getLineHeight(SMALL_FONT_ID);
+  const int contentY = gridAreaY + std::max(0, (gridAreaH - textH) / 2);
   const int timeY = contentY + renderer.getLineHeight(UI_10_FONT_ID);
   renderer.drawLine(footer.x, footer.y, footer.x + footer.width - 1, footer.y, black);
 
-  const auto title = renderer.truncatedText(UI_10_FONT_ID, tr(STR_STATS_LAST_30_DAYS), maxW - (interactive ? 15 : 0));
+  const auto title = renderer.truncatedText(UI_10_FONT_ID, heading, maxW - (interactive ? chevronWidth : 0));
   renderer.drawText(UI_10_FONT_ID, footer.x, contentY, title.c_str(), black);
   if (interactive) {
     const int x = footer.x + renderer.getTextWidth(UI_10_FONT_ID, title.c_str()) + 8;
@@ -456,17 +480,9 @@ void drawHistoryFooter(const GfxRenderer& renderer, const Rect& footer, const Da
     return;
   }
   const auto scale = ReadingHeatmap::scaleForMonth(history.seconds.data());
-  ReadingHeatmap::drawMonth(renderer, gridX, contentY + (footer.height - kHistoryTopPad - gridH) / 2, size, gridGap,
-                            history.seconds.data(), scale, black);
+  ReadingHeatmap::drawMonth(renderer, gridX, gridAreaY + (gridAreaH - gridH) / 2, size, gridGap, history.seconds.data(),
+                            scale, black);
 
-  char time[40];
-  ReadingHeatmap::formatDuration(history.totalSeconds, time, sizeof(time));
-  char streak[48];
-  if (history.streak > 0) {
-    snprintf(streak, sizeof(streak), tr(STR_STATS_DAY_STREAK_FORMAT), static_cast<unsigned>(history.streak));
-  } else {
-    snprintf(streak, sizeof(streak), "%s", tr(STR_STATS_NO_STREAK));
-  }
   renderer.drawText(UI_12_FONT_ID, footer.x, timeY,
                     renderer.truncatedText(UI_12_FONT_ID, time, maxW, EpdFontFamily::BOLD).c_str(), black,
                     EpdFontFamily::BOLD);
@@ -692,7 +708,12 @@ void DashboardHistory::load(const GlobalReadingStats* globalStats) {
 }
 
 void DashboardTheme::drawHomeHistory(const GfxRenderer& renderer, const Rect& tile, const DashboardHistory& history) {
-  const Rect footer = layoutForContent(renderer, CalibratedThemeLayout::content(renderer, tile, true)).footer;
+  Rect footer = layoutForContent(renderer, CalibratedThemeLayout::content(renderer, tile, true)).footer;
+  // Home's cover cache ends above the bezel. Use the space below it for the tappable reading history.
+  const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int bottomInset = UITheme::getInstance().getMetrics().contentSidePadding;
+  const int available = std::max(0, safe.y + safe.height - footer.y);
+  footer.height = available - std::clamp(available - footer.height, 0, bottomInset);
   drawHistoryFooter(renderer, footer, history, true, true);
   TouchRegistry::getInstance().add(footer, historyTouchId, TouchRegistry::Item);
 }

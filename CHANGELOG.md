@@ -2,7 +2,7 @@
 
 ### Added
 
-- On X4 Pro, the Dashboard shows the last 30 days of reading time and your current streak. Tap the grid or open the last page of Reading Stats to explore daily reading over 30 days and six months. The shading extends to a three-hour top bracket for frequent long readers. Turn off **Show Reading Heatmap** in Reading Stats settings to restore the original Dashboard footer.
+- On X4 Pro, the Dashboard shows the last 30 days of reading time and your current streak. Tap the grid or open the last page of Reading Stats to explore the last 30 days and a six-month calendar. The six-month grid spans the screen in one strip, with one column per week. The shading extends to a three-hour top bracket for frequent long readers. Turn off **Show Reading Heatmap** in Reading Stats settings to restore the original Dashboard footer.
 - Mark an EPUB as a short read from the Library, File Browser, or reader Settings. Reading Stats shows Books Read until you mark your first short read, then shows both completion counts. Choose Articles in Reading Stats settings if you prefer that label.
 - Support BOOX Picco and EEGO Reader A4 with touch, frontlight controls, and USB Drive support. Picco also supports its slide switch and tilt page turns.
 - Connect a reader to a computer running a compatible version of Inky to sync reading progress over USB. Reading stats and clippings can also sync using the computer’s internet connection.
@@ -37,6 +37,8 @@
 
 ### Changed
 
+- Reading Stats and the Dashboard heatmap read daily history in larger batches. EPUB paragraph and list-item jumps also use fewer SD reads in cached chapters.
+- Assembling a long EPUB clipping reuses one output buffer, reducing temporary allocations for long words and mixed-script text.
 - Cycle through up to three recent books on Dashboard Home. Swipe left on a touchscreen or hold the front Back button on a button reader.
 - `Settings > System > KOReader Sync` is now `Sync Server`. Reading Stats and Clippings are opt-in under `What to Sync` and require server support.
 - English is the only built-in interface language. Download other languages through Language settings. On PSRAM-equipped devices with small factory data partitions, including X4 Pro, language and hyphenation packs can use an SD cache without repartitioning.
@@ -54,7 +56,10 @@
 
 ### Fixed
 
+- Marking an EPUB as a book or short read preserves its current reading history when a stats file temporarily cannot be read, including after an interrupted classification change.
+- A partial EPUB clipping ending at an authored hyphen keeps that hyphen when the layout adds another one later in the same word.
 - New EPUB clippings preserve spaces between tightly set words in View Clippings and `My Clippings.txt` (#968).
+- On X4 Pro, Reading Stats keeps its page indicators above the calibrated screen edge. Pausing reading-stat tracking preserves the Dashboard book cover.
 - Credit EPUB and XTC reading to the correct local day across midnight. Preserve live stats if a save fails, retry updates after SD errors, and finish pending saves before sleep, reader restart, or USB Drive handoff.
 - Preserve unreadable stats and offer to restore them from a verified backup. Keep daily, manual, and clockless backups separate and prune numbered backups in the correct order beyond 999.
 - Sync EPUB positions more accurately in bare body text, nested markup, deep chapters, and the first chapter. Use the configured Document Matching method and each book’s render-mode cache, accept percentage-only positions, and skip uploads when a position cannot be mapped. Return to the original Library or File Browser view after context-menu sync (CrossPoint #3923 and #4472, CrossInk #853).

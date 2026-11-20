@@ -32,6 +32,7 @@ constexpr size_t MAX_PAYLOAD_BYTES = MAX_FILE_BYTES - TRAILER_BYTES;
 
 struct SlotRead {
   bool present = false;        // Distinguishes a missing file from an unreadable or torn one.
+  bool ioError = false;        // An unreadable slot could still be the newest valid snapshot.
   progress_record::Slot slot;  // kind and seq only
   size_t size = 0;             // payload bytes; for a legacy file its full size (may exceed the buffer)
 };
@@ -45,16 +46,19 @@ inline SlotRead readSlot(const char* tag, const char* path, size_t payloadSize, 
   if (!Storage.exists(path)) return result;
   result.present = true;
   HalFile file;
-  if (!Storage.openFileForRead(tag, path, file)) return result;
+  if (!Storage.openFileForRead(tag, path, file)) {
+    result.ioError = true;
+    return result;
+  }
   const size_t fileSize = file.fileSize();
   for (const size_t size : previousPayloadSizes) {
     if (fileSize == size + TRAILER_BYTES) payloadSize = size;
   }
   const size_t want = std::min(fileSize, MAX_FILE_BYTES);
   const int n = file.read(buf, want);
-  file.close();
-  if (n < 0 || static_cast<size_t>(n) != want) {
-    LOG_ERR(tag, "Short read of %s", path);
+  if (!file.close() || n < 0 || static_cast<size_t>(n) != want) {
+    result.ioError = true;
+    LOG_ERR(tag, "Could not read slot %s", path);
     return result;
   }
   if (fileSize == payloadSize + TRAILER_BYTES) {
@@ -110,6 +114,7 @@ inline bool write(const char* tag, const char* path, const char* backupPath, con
   uint8_t backupBuf[MAX_FILE_BYTES] = {};
   SlotRead primary = readSlot(tag, path, payloadSize, primaryBuf, previousPayloadSizes);
   SlotRead backup = readSlot(tag, backupPath, payloadSize, backupBuf, previousPayloadSizes);
+  if (primary.ioError || backup.ioError) return false;
   if (accept && !accept(primaryBuf, primary.size)) primary.slot.kind = progress_record::SlotKind::Invalid;
   if (accept && !accept(backupBuf, backup.size)) backup.slot.kind = progress_record::SlotKind::Invalid;
   const progress_record::SlotIndex newest = progress_record::newest(primary.slot, backup.slot);
@@ -140,10 +145,12 @@ inline bool write(const char* tag, const char* path, const char* backupPath, con
 // Selection helper for legacy code that consumes an open file. The caller must
 // use payloadLength() before interpreting the file's bytes.
 inline std::string preferredPath(const char* tag, const std::string& path, size_t payloadSize,
-                                 bool versionedOnly = false, std::initializer_list<size_t> previousPayloadSizes = {}) {
+                                 bool versionedOnly = false, std::initializer_list<size_t> previousPayloadSizes = {},
+                                 bool requireReadableSlots = false) {
   uint8_t buffer[MAX_FILE_BYTES] = {};
   const auto primary = readSlot(tag, path.c_str(), payloadSize, buffer, previousPayloadSizes);
   const auto backup = readSlot(tag, (path + ".bak").c_str(), payloadSize, buffer, previousPayloadSizes);
+  if (requireReadableSlots && (primary.ioError || backup.ioError)) return {};
   if (versionedOnly && primary.slot.kind != progress_record::SlotKind::Versioned &&
       backup.slot.kind != progress_record::SlotKind::Versioned)
     return path;

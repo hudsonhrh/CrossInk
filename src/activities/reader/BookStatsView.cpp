@@ -141,7 +141,11 @@ Rect statsSafeArea(const GfxRenderer& renderer, const bool showButtonHints) {
 
 int statsAvailableHeight(const GfxRenderer& renderer, const bool showButtonHints) {
   const auto& metrics = UITheme::getInstance().getMetrics();
+  // With history enabled, stats still has multiple pages when the RTC is unavailable.
+  const bool noRtcPager = CROSSINK_APP_READING_HEATMAP && showButtonHints && !shouldShowRtcBasedStats() &&
+                          SETTINGS.shouldShowReadingHeatmap();
   return statsSafeArea(renderer, showButtonHints).height - metrics.topPadding - metrics.verticalSpacing -
+         (noRtcPager ? kPageIndicatorClearance : 0) -
          (showButtonHints && UITheme::getButtonHintsReserve(renderer) > 0 ? kStatsButtonHintTopGap : 0);
 }
 
@@ -786,40 +790,55 @@ void drawThirtyDayGrid(const GfxRenderer& renderer, const Rect& area, ReadingSta
 
 void drawCalendarGrid(const GfxRenderer& renderer, const Rect& area, ReadingStatsDate day, const uint32_t* seconds,
                       const size_t count, const ReadingHeatmap::Scale scale) {
-  constexpr int gap = 3;
+  constexpr int gapX = 1;
+  constexpr int gapY = 3;
+  constexpr int axisGap = 4;
   const int textH = renderer.getLineHeight(SMALL_FONT_ID);
-  const int startRow = readingStatsDayOfWeekIndex(day);
-  const int weeks = (static_cast<int>(count) + startRow + 6) / 7;
-  int labelW = 0;
-  for (int row : {0, 3, 6}) {
-    labelW = std::max(labelW, renderer.getTextWidth(SMALL_FONT_ID, I18N.get(DAY_LABELS[row])));
-  }
-  labelW += 8;
-  const int step = std::max(gap + 1, std::min((area.width - labelW + gap) / weeks, (area.height - textH) / 7));
-  const int size = step - gap;
-  const int x = area.x + (area.width - labelW - weeks * step + gap) / 2;
-  const int y = area.y + (area.height - textH - 7 * step) / 2 + textH + gap;
-  for (int row : {0, 3, 6}) {
-    renderer.drawText(SMALL_FONT_ID, x, y + row * step + (size - textH) / 2, I18N.get(DAY_LABELS[row]));
-  }
-  const int gridX = x + labelW;
-  int nextLabelX = gridX;
+  const int firstRow = readingStatsDayOfWeekIndex(day);
+  const int weeks = (static_cast<int>(count) + firstRow + 6) / 7;
+  const int maxCellByHeight = std::max(1, (area.height - 2 * (textH + axisGap) - 6 * gapY) / 7);
+  const int cell = std::clamp((area.width + gapX) / weeks - gapX, 1, maxCellByHeight);
+  const int gridH = 7 * cell + 6 * gapY;
+  // On dates near the calendar epoch the window can have fewer weeks. Keep those columns together.
+  const int gridW = std::min(area.width, weeks * cell + (weeks - 1) * (gapX + 1));
+  const int gridX = area.x + (area.width - gridW) / 2;
+  const auto weekX = [&](int week) { return gridX + week * (gridW - cell) / (weeks - 1); };
+  const int monthY = area.y + (area.height - 2 * (textH + axisGap) - gridH) / 2;
+  const int gridY = monthY + textH + axisGap;
+  // Orient the weekday axis without giving up a column of screen width.
+  const char* monday = I18N.get(DAY_LABELS[0]);
+  const char* sunday = I18N.get(DAY_LABELS[6]);
+  const int mondayW = renderer.getTextWidth(SMALL_FONT_ID, monday);
+  const int axisW = mondayW + 17 + renderer.getTextWidth(SMALL_FONT_ID, sunday);
+  const int axisX = area.x + (area.width - axisW) / 2;
+  const int axisY = gridY + gridH + axisGap;
+  renderer.drawText(SMALL_FONT_ID, axisX, axisY, monday);
+  const int arrowX = axisX + mondayW + 8;
+  const int arrowY = axisY + textH / 2;
+  renderer.drawLine(arrowX, arrowY - 5, arrowX, arrowY + 5);
+  renderer.drawLine(arrowX - 3, arrowY + 2, arrowX, arrowY + 5);
+  renderer.drawLine(arrowX + 3, arrowY + 2, arrowX, arrowY + 5);
+  renderer.drawText(SMALL_FONT_ID, axisX + mondayW + 17, axisY, sunday);
+  int nextLabelX = area.x;
   for (size_t i = 0; i < count; ++i) {
-    const int slot = startRow + static_cast<int>(i);
-    const int cellX = gridX + (slot / 7) * step;
-    ReadingHeatmap::drawCell(renderer, cellX, y + (slot % 7) * step, size,
+    const int slot = firstRow + static_cast<int>(i);
+    const int week = slot / 7;
+    const int cellX = weekX(week);
+    ReadingHeatmap::drawCell(renderer, cellX, gridY + (slot % 7) * (cell + gapY), cell,
                              ReadingHeatmap::levelForSeconds(seconds[i], scale));
     if (i == 0 || day.day == 1) {
-      char label[12];
-      formatReadingStatsMonthToken(day, label, sizeof(label));
-      const int width = renderer.getTextWidth(SMALL_FONT_ID, label);
-      // A short opening month can share a week with the next one. Its date is
-      // already in the heading, so give the next month its full label.
-      const int nextMonthWeek = (slot + daysInMonth(day.year, day.month) - day.day + 1) / 7;
-      const bool fitsPartialMonth = i != 0 || day.day == 1 || cellX + width + gap <= gridX + nextMonthWeek * step;
-      if (fitsPartialMonth && cellX >= nextLabelX && cellX + width <= area.x + area.width) {
-        renderer.drawText(SMALL_FONT_ID, cellX, y - textH - gap, label);
-        nextLabelX = cellX + width + gap;
+      char month[12];
+      formatReadingStatsMonthToken(day, month, sizeof(month));
+      const int width = renderer.getTextWidth(SMALL_FONT_ID, month);
+      int x = std::min(cellX, area.x + area.width - width);
+      if (i == 0 && day.day != 1) {
+        // Suppress a partial opening label if it overlaps the next complete month.
+        const int nextMonthWeek = (slot + daysInMonth(day.year, day.month) - day.day + 1) / 7;
+        x = std::min(x, weekX(nextMonthWeek) - width - axisGap);
+      }
+      if (x >= nextLabelX) {
+        renderer.drawText(SMALL_FONT_ID, x, monthY, month);
+        nextLabelX = x + width + axisGap;
       }
     }
     addDaysToReadingStatsDate(day, 1);
@@ -874,25 +893,29 @@ void renderHeatmapStatsPage(GfxRenderer& renderer, const MappedInputManager& map
   } else {
     const auto scale = ReadingHeatmap::scaleForMonth(seconds, count);
     const int legendH = renderer.getLineHeight(SMALL_FONT_ID) + 6;
-    const int headingH = renderer.getLineHeight(UI_12_FONT_ID) + 8;
-    const int summaryH = renderer.getLineHeight(UI_12_FONT_ID) + renderer.getLineHeight(SMALL_FONT_ID) + 12;
-    const int periodH = (bottom - top - legendH - 28) / 2;
+    const int headingH = renderer.getLineHeight(UI_12_FONT_ID) + 6;
+    const int summaryH = renderer.getLineHeight(UI_12_FONT_ID) + renderer.getLineHeight(SMALL_FONT_ID) + 7;
+    constexpr int dividerGap = 28;
+    const int totalH = bottom - top - legendH - dividerGap - 16;
+    // Leave room above and below the six-month strip for the month names and weekday key.
+    const int recentH = (totalH - 2 * renderer.getLineHeight(SMALL_FONT_ID) - 8) / 2;
     for (int period = 0; period < 2; ++period) {
       const bool recent = period == 0;
       const size_t days = recent ? ReadingHeatmap::MonthDays : count;
       const uint32_t* values = seconds + count - days;
       ReadingStatsDate first = today;
       addDaysToReadingStatsDate(first, 1 - static_cast<int>(days));
-      const int y = top + period * (periodH + 20);
+      const int periodH = recent ? recentH : totalH - recentH;
+      const int y = recent ? top : top + recentH + dividerGap;
       drawPeriodHeading(renderer, Rect(x, y, width, headingH),
                         recent ? tr(STR_STATS_LAST_30_DAYS) : tr(STR_STATS_LAST_SIX_MONTHS), first, today);
       const Rect grid(x, y + headingH, width, periodH - headingH - summaryH);
       if (recent)
         drawThirtyDayGrid(renderer, grid, first, values, scale);
       else
-        drawCalendarGrid(renderer, grid, first, values, days, scale);
+        drawCalendarGrid(renderer, Rect(safe.x + 2, grid.y, safe.width - 4, grid.height), first, values, days, scale);
       drawPeriodSummary(renderer, Rect(x, y + periodH - summaryH, width, summaryH), values, days);
-      if (recent) renderer.drawLine(x, y + periodH + 9, x + width - 1, y + periodH + 9);
+      if (recent) renderer.drawLine(x, y + periodH + dividerGap / 2, x + width - 1, y + periodH + dividerGap / 2);
     }
     drawHeatmapLegend(renderer, Rect(x, bottom - legendH, width, legendH), scale);
   }
