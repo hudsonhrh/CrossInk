@@ -23,6 +23,8 @@ struct HostFaults {
   size_t readErrorAfter = 0;
   bool shortRead = false;
   size_t writes = 0;
+  size_t readOpens = 0;
+  size_t reads = 0;
 };
 inline HostFaults faults;
 class HalFile : public Print {
@@ -30,6 +32,7 @@ class HalFile : public Print {
   HalFile() = default;
   HalFile(std::shared_ptr<HostFileData> data, std::string name) : data_(std::move(data)), name_(std::move(name)) {}
   int read(void* output, size_t length) {
+    ++faults.reads;
     if (!data_) return 0;
     if (name_ == faults.readErrorPath && cursor_ >= faults.readErrorAfter) return faults.shortRead ? 0 : -1;
     const size_t n = std::min(length, data_->bytes.size() - std::min(cursor_, data_->bytes.size()));
@@ -127,6 +130,7 @@ class HalStorage {
     return file;
   }
   bool openFileForRead(const char*, const std::string& path, HalFile& file) {
+    ++faults.readOpens;
     if (faults.failReadPath == path) return false;
     const auto it = files.find(path);
     if (it == files.end()) return false;
