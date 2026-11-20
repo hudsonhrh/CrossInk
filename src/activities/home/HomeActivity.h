@@ -1,4 +1,5 @@
 #pragma once
+#include <AppCapabilities.h>
 #include <HalDisplay.h>
 #include <ScreenInsets.h>
 
@@ -16,6 +17,9 @@
 #include "activities/reader/GlobalReadingStats.h"
 #include "components/CoverGridHomeUi.h"
 #include "components/OptionPopup.h"
+#if CROSSINK_APP_READING_HEATMAP
+#include "components/themes/dashboard/DashboardTheme.h"
+#endif
 #include "util/ButtonNavigator.h"
 
 struct RecentBook;
@@ -84,6 +88,9 @@ class HomeActivity final : public Activity {
   GlobalReadingStats globalStats;
   GlobalReadingStats allDevicesGlobalStats;
   bool showAllDevicesStats = false;
+#if CROSSINK_APP_READING_HEATMAP
+  DashboardHistory dashboardHistory;
+#endif
 
   // Per-book stats and progress cached at onEnter() to avoid SD reads during navigation.
   std::array<BookReadingStats, kMaxCachedBooks> cachedBookStats{};
@@ -96,6 +103,7 @@ class HomeActivity final : public Activity {
   bool carouselWarmupPending = false;
   ScreenInsets insetsBeforeFrontlightPanel;
   uint8_t themeBeforeFrontlightPanel = 0;
+  bool dashboardHeatmapBeforeFrontlightPanel = false;
   uint8_t scaleBeforeFrontlightPanel = 0;
   uint32_t filenameFontBeforeFrontlightPanel = 0;
   uint8_t statusSizeBeforeFrontlightPanel = 0;
@@ -112,7 +120,7 @@ class HomeActivity final : public Activity {
   void onSettingsOpen();
   void onFileTransferOpen();
   void onPluginsOpen();
-  void onReadingStatsOpen();
+  void onReadingStatsOpen(bool openHistory = false);
   void onSavedItemsOpen();
 
   int getMenuItemCount() const;
@@ -140,6 +148,7 @@ class HomeActivity final : public Activity {
   bool loadCoverGridThumbnails();
   void activateCoverGridSelection();
   void loadAllBookStats();
+  void loadGlobalStats();
   void loadRecentCovers(int coverHeight);
 
  public:

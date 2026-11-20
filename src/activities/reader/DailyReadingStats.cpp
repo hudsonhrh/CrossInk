@@ -65,6 +65,14 @@ bool monthFor(uint32_t day, uint32_t& first, uint8_t& count) {
   count = daysInMonth(date.year, date.month);
   return true;
 }
+ReadingStatsDate monthsBefore(const ReadingStatsDate& date, unsigned months) {
+  const unsigned monthIndex = (date.year - 2000) * 12u + date.month - 1;
+  if (months > monthIndex) return {};
+  const unsigned previous = monthIndex - months;
+  const auto year = static_cast<uint16_t>(2000 + previous / 12);
+  const auto month = static_cast<uint8_t>(1 + previous % 12);
+  return {year, month, std::min(date.day, daysInMonth(year, month))};
+}
 // A corrupt slot can fall back; I/O errors and unknown versions must never be overwritten.
 bool readSlot(uint32_t first, uint8_t count, int slot, bool& exists, bool& valid, uint32_t& generation,
               Counter* counters = nullptr, const Counter* synced = nullptr) {
@@ -237,7 +245,7 @@ bool digits(const char* name, size_t n, uint32_t& value) {
   }
   return true;
 }
-bool fileMonth(const char* name, uint32_t& first) {
+bool fileMonth(const char* name, uint32_t& first, bool legacyOnly) {
   const size_t length = strlen(name);
   uint32_t day;
   if (((length == 9 && strcmp(name + 5, ".bin") == 0) ||
@@ -247,7 +255,7 @@ bool fileMonth(const char* name, uint32_t& first) {
     return monthFor(day, first, count);
   }
   uint32_t year, month;
-  if (length != 13 || name[4] != '-' || name[7] != '.' || (name[8] != 'a' && name[8] != 'b') ||
+  if (legacyOnly || length != 13 || name[4] != '-' || name[7] != '.' || (name[8] != 'a' && name[8] != 'b') ||
       strcmp(name + 9, ".bin") != 0 || !digits(name, 4, year) || !digits(name + 5, 2, month))
     return false;
   const ReadingStatsDate date{static_cast<uint16_t>(year), static_cast<uint8_t>(month), 1};
@@ -257,7 +265,7 @@ bool fileMonth(const char* name, uint32_t& first) {
 }
 // Close the directory before migration, writes, or network work. Rescanning by month
 // keeps memory bounded and avoids invalidating a directory cursor during conversion.
-bool nextMonth(uint32_t after, uint32_t& first) {
+bool nextMonth(uint32_t after, uint32_t& first, bool legacyOnly = false) {
   first = UINT32_MAX;
   if (!Storage.exists(localDirectory.c_str())) return true;
   FsFile dir = Storage.open(localDirectory.c_str());
@@ -278,7 +286,8 @@ bool nextMonth(uint32_t after, uint32_t& first) {
       break;
     }
     uint32_t candidate;
-    if (fileMonth(name, candidate) && (after == UINT32_MAX || candidate > after)) first = std::min(first, candidate);
+    if (fileMonth(name, candidate, legacyOnly) && (after == UINT32_MAX || candidate > after))
+      first = std::min(first, candidate);
   }
   ok = ok && !FsHelpers::directoryIterationFailed(dir);
   dir.close();
@@ -375,6 +384,16 @@ bool save(Cache& c) {
   c.dirty = 0;
   return true;
 }
+bool pendingDayMask(uint32_t first, uint8_t count, uint32_t& mask) {
+  if (!migrateMonth(first, count)) return false;
+  Month month;
+  if (!loadMonth(first, count, month)) return false;
+  mask = 0;
+  for (uint8_t i = 0; i < count; ++i) {
+    if (month.days[i].seconds != month.days[i].uploaded) mask |= uint32_t{1} << i;
+  }
+  return true;
+}
 }  // namespace
 
 #ifdef DAILY_READING_STATS_TEST
@@ -437,8 +456,11 @@ bool uploadPending(bool (*upload)(void*, uint32_t, uint32_t), void* context) {
     if (first == UINT32_MAX) return true;
     uint8_t count;
     uint32_t unused;
-    if (!monthFor(first, unused, count)) return false;
+    // Check retained, acknowledged months only once. Keep the month buffer off the stack during network I/O.
+    uint32_t pending;
+    if (!monthFor(first, unused, count) || !pendingDayMask(first, count, pending)) return false;
     for (uint8_t i = 0; i < count; ++i) {
+      if (!(pending & (uint32_t{1} << i))) continue;
       Counter counter;
       if (!read(first + i, counter)) return false;
       if (counter.seconds == counter.uploaded) continue;
@@ -450,20 +472,14 @@ bool uploadPending(bool (*upload)(void*, uint32_t, uint32_t), void* context) {
   }
 }
 
-bool pruneSyncedMonths(const ReadingStatsDate& today) {
+bool pruneSyncedMonths(const ReadingStatsDate& today, uint8_t priorMonthsToKeep) {
   if (!today.isValid()) {
     LOG_ERR("DailyStats", "Skipping cleanup without a valid local date");
     return false;
   }
-  ReadingStatsDate previous{today.year, today.month, 1};
-  if (previous.month == 1) {
-    if (previous.year == 2000) return true;
-    --previous.year;
-    previous.month = 12;
-  } else {
-    --previous.month;
-  }
-  const uint32_t keepFrom = readingStatsDayIndex(previous);
+  const ReadingStatsDate oldest = monthsBefore({today.year, today.month, 1}, priorMonthsToKeep);
+  if (!oldest.isValid()) return true;  // All supported dates are retained.
+  const uint32_t keepFrom = readingStatsDayIndex(oldest);
   // Accepted but uncheckpointed time must participate in the retention decision.
   if (!prepareDirectory() || !flush()) return false;
   bool ok = true;
@@ -533,6 +549,54 @@ bool secondsFor(uint32_t day, uint32_t& seconds) {
   if (!read(day, counter)) return false;
   seconds = counter.seconds;
   return true;
+}
+
+size_t sixMonthDayCount(const ReadingStatsDate& today) {
+  if (!today.isValid()) return 0;
+  const ReadingStatsDate cutoff = monthsBefore(today, 6);
+  const uint32_t end = readingStatsDayIndex(today);
+  return cutoff.isValid() ? end - readingStatsDayIndex(cutoff) : end + 1;
+}
+
+bool loadWindow(const ReadingStatsDate& today, uint32_t* seconds, size_t count) {
+  if (!today.isValid() || !seconds || !count || count > MAX_SIX_MONTH_DAYS) return false;
+  if (!prepareDirectory()) return false;
+  const uint32_t end = readingStatsDayIndex(today);
+  // Before the epoch, pad a fixed-length chart with empty days.
+  const size_t validDays = std::min<size_t>(count, end + 1);
+  std::fill_n(seconds, count - validDays, 0u);
+  uint32_t* const datedSeconds = seconds + (count - validDays);
+  const uint32_t start = end + 1 - validDays;
+  uint32_t first;
+  uint8_t monthDays;
+  if (!monthFor(start, first, monthDays)) return false;
+  // A single name scan avoids probing three possible legacy filenames for every day of a modern history.
+  uint32_t legacyMonth;
+  if (!nextMonth(first ? first - 1 : UINT32_MAX, legacyMonth, true)) return false;
+  for (uint32_t day = start; day <= end;) {
+    if (first >= legacyMonth && !migrateMonth(first, monthDays)) return false;
+    Month month;
+    if (!loadMonth(first, monthDays, month)) return false;
+    const uint32_t next = std::min(end + 1, first + monthDays);
+    for (; day < next; ++day) datedSeconds[day - start] = month.days[day - first].seconds;
+    if (day <= end && !monthFor(day, first, monthDays)) return false;
+  }
+  for (const Cache& c : cache) {
+    if (c.day >= start && c.day <= end) datedSeconds[c.day - start] = c.counter.seconds;
+  }
+  return true;
+}
+
+WindowSummary summarizeWindow(const uint32_t* seconds, size_t count) {
+  WindowSummary summary;
+  uint64_t total = 0;
+  for (size_t i = 0; i < count; ++i) {
+    total += seconds[i];
+    if (seconds[i]) ++summary.activeDays;
+    summary.peakSeconds = std::max(summary.peakSeconds, seconds[i]);
+  }
+  summary.totalSeconds = static_cast<uint32_t>(std::min<uint64_t>(total, UINT32_MAX));
+  return summary;
 }
 
 Summary summarize(uint32_t today) {

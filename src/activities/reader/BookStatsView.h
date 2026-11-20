@@ -32,6 +32,9 @@ void renderGlobalStatsPage(GfxRenderer& renderer, const MappedInputManager* mapp
                            const GlobalReadingStats& stats, bool showButtonHints, bool showMoreButton,
                            const DailyReadingStats::Summary* daily = nullptr, bool showSyncAction = false);
 
+void renderHeatmapStatsPage(GfxRenderer& renderer, const MappedInputManager& mappedInput, const ReadingStatsDate& today,
+                            const uint32_t* seconds, size_t count);
+
 void renderNoRtcCombinedStatsPage(GfxRenderer& renderer, const MappedInputManager* mappedInput,
                                   const std::string& bookTitle, const BookReadingStats& bookStats,
                                   float progressPercent, bool hasEstimatedTimeLeft, uint32_t estimatedTimeLeftSeconds,

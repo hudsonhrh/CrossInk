@@ -27,6 +27,12 @@
 #define CROSSINK_APP_DEVICE_X4CLASSIC 0
 #endif
 
+#if (defined(FREEINK_DEVICE_X4PRO) && FREEINK_DEVICE_X4PRO) || defined(SIMULATOR_DEVICE_X4_PRO)
+#define CROSSINK_APP_READING_HEATMAP 1
+#else
+#define CROSSINK_APP_READING_HEATMAP 0
+#endif
+
 // Native simulator BoardConfig deliberately has no FREEINK_CAP_TOUCH macro.
 // Firmware builds must keep the app and SDK capability selections in lockstep.
 #if !defined(SIMULATOR)

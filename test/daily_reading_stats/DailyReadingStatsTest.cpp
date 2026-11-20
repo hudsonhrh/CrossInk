@@ -3,8 +3,12 @@
 #include <HalStorage.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
+
 #include "DailyReadingStats.h"
 #include "StatsUploadPayload.h"
+#include "components/ReadingHeatmap.h"
 using namespace DailyReadingStats;
 namespace DailyReadingStats {
 void resetForTest();
@@ -643,6 +647,106 @@ static uint32_t dateDay(uint16_t year, uint8_t month, uint8_t day = 1) {
 }
 static bool hasMonth(const char* month) {
   return Storage.exists(monthFile(month, 'a').c_str()) || Storage.exists(monthFile(month, 'b').c_str());
+}
+TEST_F(DailyReading, RollingWindowIncludesLegacyMonthlyAndPendingTimeInDateOrder) {
+  const ReadingStatsDate today{2028, 3, 2};
+  const uint32_t end = readingStatsDayIndex(today);
+  ASSERT_TRUE(write(end - 30, {180, 180}));  // Too old for this view.
+  seedLegacy(end - 29, {270, 200}, ".bak");
+  ASSERT_TRUE(write(end - 2, {90, 90}));    // Leap day.
+  ASSERT_TRUE(write(end + 1, {120, 120}));  // Future day.
+  reboot();
+  ASSERT_TRUE(record(end, 20));
+  std::array<uint32_t, 30> window;
+  ASSERT_TRUE(loadWindow(today, window.data(), window.size()));
+  EXPECT_EQ(window.front(), 270u);
+  EXPECT_EQ(window[27], 90u);
+  EXPECT_EQ(window.back(), 20u);
+  const auto summary = summarizeWindow(window.data(), window.size());
+  EXPECT_EQ(summary.totalSeconds, 380u);
+  EXPECT_EQ(summary.activeDays, 3u);
+  EXPECT_EQ(summary.peakSeconds, 270u);
+
+  faults.failReadPath = monthFile("2028-02", 'a');
+  EXPECT_FALSE(loadWindow(today, window.data(), window.size()));
+}
+TEST_F(DailyReading, SixMonthWindowClampsShortMonthsAndRespectsLeapYears) {
+  EXPECT_EQ(sixMonthDayCount({2028, 8, 31}), dateDay(2028, 8, 31) - dateDay(2028, 2, 29));
+  EXPECT_EQ(sixMonthDayCount({2027, 8, 31}), dateDay(2027, 8, 31) - dateDay(2027, 2, 28));
+  EXPECT_EQ(sixMonthDayCount({2028, 1, 3}), dateDay(2028, 1, 3) - dateDay(2027, 7, 3));
+  EXPECT_EQ(sixMonthDayCount({2028, 8, 31}), MAX_SIX_MONTH_DAYS);
+  EXPECT_EQ(sixMonthDayCount({2000, 1, 1}), 1u);
+  EXPECT_EQ(sixMonthDayCount({}), 0u);
+}
+TEST(ReadingHeatmapScale, SixCompletedDaysAtNinetyMinutesSelectTheExtendedScale) {
+  using namespace ReadingHeatmap;
+  std::array<uint32_t, MonthDays> month{};
+  for (int day : {0, 3, 12, 19, 27}) month[day] = 90 * 60;
+  month[28] = 90 * 60 - 1;
+  month.back() = 6 * 3600;  // Today's reading never changes the scale mid-session.
+  EXPECT_EQ(scaleForMonth(month.data()), Scale::Standard);
+  ++month[28];
+  EXPECT_EQ(scaleForMonth(month.data()), Scale::Extended);
+  month.back() = 0;
+  EXPECT_EQ(scaleForMonth(month.data()), Scale::Extended);
+}
+TEST(ReadingHeatmapScale, CellIntensityAndLegendAgreeOnEveryBoundary) {
+  using namespace ReadingHeatmap;
+  for (const Scale scale : {Scale::Standard, Scale::Extended}) {
+    const std::array<int, 3> minutes =
+        scale == Scale::Standard ? std::array<int, 3>{15, 45, 90} : std::array<int, 3>{30, 90, 180};
+    EXPECT_EQ(levelForSeconds(0, scale), 0);
+    EXPECT_EQ(levelForSeconds(1, scale), 1);
+    for (int i = 0; i < 3; ++i) {
+      SCOPED_TRACE(minutes[i]);
+      EXPECT_EQ(thresholdMinutes(scale, i), minutes[i]);
+      EXPECT_EQ(levelForSeconds(minutes[i] * 60 - 1, scale), i + 1);
+      EXPECT_EQ(levelForSeconds(minutes[i] * 60, scale), i + 2);
+    }
+    EXPECT_EQ(levelForSeconds(UINT32_MAX, scale), 4);
+  }
+}
+TEST(ReadingHeatmapScale, DashboardAndSixMonthChartUseTheSameRecentDays) {
+  using namespace ReadingHeatmap;
+  std::array<uint32_t, MAX_SIX_MONTH_DAYS> sixMonths;
+  sixMonths.fill(180 * 60);  // A heavy winter must not set the scale for a quiet spring.
+  std::array<uint32_t, MonthDays> dashboard{};
+  uint32_t* const recent = sixMonths.data() + sixMonths.size() - dashboard.size();
+  for (int heavyDays : {5, 6}) {
+    std::fill_n(dashboard.begin(), heavyDays, 90 * 60);
+    std::copy(dashboard.begin(), dashboard.end(), recent);
+    const auto expected = heavyDays == 6 ? Scale::Extended : Scale::Standard;
+    EXPECT_EQ(scaleForMonth(dashboard.data()), expected);
+    EXPECT_EQ(scaleForMonth(sixMonths.data(), sixMonths.size()), expected);
+  }
+}
+TEST_F(DailyReading, ExtendedRetentionKeepsEveryMonthOverlappingTheHeatmap) {
+  ASSERT_TRUE(write(dateDay(2027, 6, 30), {120, 120}));
+  ASSERT_TRUE(write(dateDay(2027, 7, 2), {120, 120}));
+  ASSERT_TRUE(pruneSyncedMonths({2028, 1, 1}, 6));
+  EXPECT_FALSE(hasMonth("2027-06"));
+  EXPECT_TRUE(hasMonth("2027-07"));
+}
+TEST_F(DailyReading, UploadChecksEachSettledMonthOnceAndFlushesPendingTime) {
+  for (uint8_t month = 1; month <= 7; ++month) ASSERT_TRUE(write(dateDay(2027, month, 1), {120, 120}));
+  reboot();
+  auto refuse = [](void*, uint32_t, uint32_t) { return false; };
+  ASSERT_TRUE(uploadPending(refuse, nullptr));
+  // One integrity check for each slot, then one read of the newest slot for each retained month.
+  EXPECT_EQ(faults.readOpens, 3u * 7);
+
+  ASSERT_TRUE(record(dateDay(2027, 7), 15));
+  EXPECT_FALSE(uploadPending(refuse, nullptr));
+  uint32_t received = 0;
+  ASSERT_TRUE(uploadPending(
+      [](void* ctx, uint32_t day, uint32_t value) {
+        EXPECT_EQ(day, dateDay(2027, 7));
+        *static_cast<uint32_t*>(ctx) = value;
+        return true;
+      },
+      &received));
+  EXPECT_EQ(received, 135u);
+  EXPECT_TRUE(uploadPending(refuse, nullptr));
 }
 TEST_F(DailyReading, CleanupKeepsRecentFutureAndUnsyncedMonths) {
   ASSERT_TRUE(write(dateDay(2026, 5), {100, 100}));
