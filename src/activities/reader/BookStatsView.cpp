@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdio>
 
+#include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "components/CompactHeader.h"
 #include "components/TouchActionButtons.h"
@@ -359,7 +360,8 @@ void drawPerBookStatsCard(GfxRenderer& renderer, const int x, const int y, const
   const int titleFont = renderer.filenameFontId(UI_10_FONT_ID);
   const int titleY = y + (layout.topCardTitleH - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
   if (stats.isArticle) {
-    const std::string title = std::string(tr(STR_STATS_ARTICLE)) + " · " + bookTitle;
+    const char* type = SETTINGS.usesShortReadsLabel() ? tr(STR_STATS_SHORT_READ) : tr(STR_STATS_ARTICLE);
+    const std::string title = std::string(type) + " · " + bookTitle;
     drawCenteredLabel(renderer, titleFont, x + 6, w - 12, titleY, title.c_str(), true);
   } else {
     drawCenteredLabel(renderer, titleFont, x + 6, w - 12, titleY, bookTitle.c_str(), true);
@@ -498,7 +500,8 @@ void drawGlobalStatsCard(GfxRenderer& renderer, const int x, const int y, const 
   grid.draw(renderer, showArticles ? 4 : 5, booksRead, tr(STR_STATS_COMPLETED_LBL));
   if (showArticles) {
     snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(stats.completedArticles));
-    grid.draw(renderer, 5, buf, tr(STR_STATS_ARTICLES_READ));
+    const char* label = SETTINGS.usesShortReadsLabel() ? tr(STR_STATS_SHORT_READS) : tr(STR_STATS_ARTICLES_READ);
+    grid.draw(renderer, 5, buf, label);
   }
   if (!showRtcStats) return;
 

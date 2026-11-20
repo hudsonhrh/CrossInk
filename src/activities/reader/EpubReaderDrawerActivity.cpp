@@ -29,6 +29,7 @@
 #include "ReaderUtils.h"
 #include "SettingsList.h"
 #include "StablePageSelectionModel.h"
+#include "activities/home/BookActions.h"
 #include "activities/reader/ControlsOptionsActivity.h"
 #include "activities/settings/StatusBarSettingsActivity.h"
 #include "util/ImageDisplayMode.h"
@@ -3259,7 +3260,7 @@ const char* EpubReaderDrawerActivity::rowLabel(const RowId row) const {
     case RowId::IndexingMethod:
       return tr(STR_INDEXING_METHOD);
     case RowId::ToggleArticle:
-      return isArticle ? tr(STR_MARK_AS_BOOK) : tr(STR_MARK_AS_ARTICLE);
+      return I18N.get(BookActions::toggleArticleLabel(isArticle));
     case RowId::ToggleCompleted:
       return isBookCompleted ? tr(STR_MARK_UNFINISHED) : tr(STR_MARK_FINISHED);
     case RowId::TrackBookStats:

@@ -85,8 +85,7 @@ std::vector<FileBrowserActionActivity::MenuItem> buildBookActionItems(const std:
       }
     }
     if (FsHelpers::hasEpubExtension(fullPath)) {
-      items.push_back(
-          {FileBrowserAction::ToggleArticle, stats.isArticle ? StrId::STR_MARK_AS_BOOK : StrId::STR_MARK_AS_ARTICLE});
+      items.push_back({FileBrowserAction::ToggleArticle, toggleArticleLabel(stats.isArticle)});
     }
     items.push_back({FileBrowserAction::ToggleCompleted,
                      stats.isCompleted ? StrId::STR_MARK_UNFINISHED : StrId::STR_MARK_FINISHED});
@@ -258,6 +257,11 @@ std::string confirmationHeading(const StrId actionLabelId) {
   return std::string(tr(STR_CONFIRM)) + ": " + std::string(I18N.get(actionLabelId));
 }
 
+StrId toggleArticleLabel(const bool isArticle) {
+  if (isArticle) return StrId::STR_MARK_AS_BOOK;
+  return SETTINGS.usesShortReadsLabel() ? StrId::STR_MARK_AS_SHORT_READ : StrId::STR_MARK_AS_ARTICLE;
+}
+
 StrId toggleArticle(const std::string& fullPath) {
   bool article = false;
   if (!FsHelpers::hasEpubExtension(fullPath) ||
@@ -265,7 +269,8 @@ StrId toggleArticle(const std::string& fullPath) {
     return StrId::STR_SAVE_TYPE_FAILED;
   }
   SyncPending::mark(fullPath, SyncPending::STATS_BIT);
-  return article ? StrId::STR_MARKED_AS_ARTICLE : StrId::STR_MARKED_AS_BOOK;
+  if (!article) return StrId::STR_MARKED_AS_BOOK;
+  return SETTINGS.usesShortReadsLabel() ? StrId::STR_MARKED_AS_SHORT_READ : StrId::STR_MARKED_AS_ARTICLE;
 }
 
 bool isBookCompletedForList(const std::string& fullPath) {

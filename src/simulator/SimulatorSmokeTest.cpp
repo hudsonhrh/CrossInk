@@ -4808,11 +4808,15 @@ class SimulatorSmokeTest {
       }
       const uint8_t originalTracking = SETTINGS.trackReadingStats;
       const uint8_t originalShortcut = SETTINGS.shortPwrBtn;
+      const uint8_t originalLabel = SETTINGS.readingStatsCategoryLabel;
       SETTINGS.trackReadingStats = 0;
       SETTINGS.shortPwrBtn = CrossPointSettings::READING_STATS;
+      SETTINGS.readingStatsCategoryLabel = CrossPointSettings::STATS_LABEL_SHORT_READS;
       JsonDocument disabled;
       SETTINGS.toJson(disabled);
+      SETTINGS.readingStatsCategoryLabel = CrossPointSettings::STATS_LABEL_ARTICLES;
       SETTINGS.fromJson(disabled.as<JsonVariantConst>());
+      if (!SETTINGS.usesShortReadsLabel()) fail("Short Reads label did not survive a settings round trip");
       if (SETTINGS.shortPwrBtn != CrossPointSettings::READING_STATS)
         fail("Disabled stats tracking discarded a persisted shortcut");
       const auto hidden = getSettingsList();
@@ -4821,6 +4825,19 @@ class SimulatorSmokeTest {
       if (power == hidden.end() || std::find(power->enumRawValues.begin(), power->enumRawValues.end(),
                                              CrossPointSettings::READING_STATS) != power->enumRawValues.end())
         fail("Stats shortcut still offered while tracking is disabled");
+      SETTINGS.trackReadingStats = 1;
+      const auto statsMenu = buildSystemReadingStatsSettingsList(second);
+      if (std::none_of(statsMenu.begin(), statsMenu.end(),
+                       [](const SettingInfo& setting) { return settingKeyIs(setting, "readingStatsCategoryLabel"); }))
+        fail("Reading Stats menu is missing its category label");
+      disabled["readingStatsCategoryLabel"] = 99;
+      SETTINGS.fromJson(disabled.as<JsonVariantConst>());
+      if (SETTINGS.usesShortReadsLabel()) fail("Invalid category label did not fall back to Articles");
+      disabled.remove("readingStatsCategoryLabel");
+      SETTINGS.readingStatsCategoryLabel = CrossPointSettings::STATS_LABEL_SHORT_READS;
+      SETTINGS.fromJson(disabled.as<JsonVariantConst>());
+      if (SETTINGS.usesShortReadsLabel()) fail("Older settings did not restore Articles");
+      SETTINGS.readingStatsCategoryLabel = originalLabel;
       SETTINGS.trackReadingStats = originalTracking;
       SETTINGS.shortPwrBtn = originalShortcut;
       LOG_INF("SMOKE", "Settings catalog ownership and streamed persistence checks passed (%zu entries)", index);

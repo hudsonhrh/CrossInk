@@ -348,8 +348,10 @@ moves its completion between categories. Choose **Mark as Book** to switch it
 back. Both counts stay visible until you reset that reading history. Books and
 articles both contribute to reading time, sessions, and streaks.
 
-A standalone essay fits the article category. A collection of essays can stay
-a book if you read it as one volume.
+If you read essays or short stories, open **Settings > System > Reading Stats**
+and change **Article Label** to **Short Reads**. The action becomes **Mark as
+Short Read** and the stats screen calls the same count **Short Reads**. You can
+switch back to **Articles** at any time. The wording is personal to this reader.
 
 ### Turn tracking on or off
 

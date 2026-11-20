@@ -442,6 +442,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
 
   // Clipping storage mode
   enum CLIPPING_STORAGE : uint8_t { SINGLE_FILE = 0, PER_BOOK = 1, CLIPPING_STORAGE_COUNT };
+
+  enum READING_STATS_CATEGORY_LABEL : uint8_t { STATS_LABEL_ARTICLES = 0, STATS_LABEL_SHORT_READS = 1 };
   // Clip selector navigation scheme
   enum CLIP_NAV_MODE : uint8_t { LINE_AWARE = 0, WORD_BY_WORD = 1, CLIP_NAV_MODE_COUNT };
   // Annotation underline visibility
@@ -739,6 +741,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t quickResumeSleepScreen = QUICK_RESUME_NEVER;
   // Master switch for automatic reading statistics; Time Left pace remains independent.
   uint8_t trackReadingStats = 1;
+  uint8_t readingStatsCategoryLabel = STATS_LABEL_ARTICLES;
 
   ~CrossPointSettings() = default;
 
@@ -786,6 +789,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   }
 
   bool shouldTrackReadingStats() const { return trackReadingStats != 0; }
+  bool usesShortReadsLabel() const { return readingStatsCategoryLabel == STATS_LABEL_SHORT_READS; }
   static const char* getDefaultDeviceName();
   const char* getEffectiveDeviceName() const;
   uint16_t getReadingIdleTimeThresholdSeconds() const;

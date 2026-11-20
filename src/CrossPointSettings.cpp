@@ -627,10 +627,11 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
       return;
     }
 
-    // Missing keys in older exports restore the original status font size and
-    // bidirectional tilt behavior, even if this session changed them.
+    // Missing keys in older exports restore the original status font size,
+    // article label and bidirectional tilt behavior, even if this session changed them.
     // Sensitivity also restores Normal for older exports and invalid values.
     const uint8_t fieldDefault = info.valuePtr == &CrossPointSettings::displayStatusBarTextSize ||
+                                         info.valuePtr == &CrossPointSettings::readingStatsCategoryLabel ||
                                          info.valuePtr == &CrossPointSettings::tiltNextPageOnly
                                      ? 0
                                      : this->*(info.valuePtr);

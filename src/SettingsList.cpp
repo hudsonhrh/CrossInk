@@ -334,6 +334,9 @@ void forEachBaseSetting(SettingVisitor visitor, void* context) {
                          "readingIdleTimeThresholdUnits", StrId::STR_CAT_SYSTEM));
   add(SettingInfo::Toggle(StrId::STR_TRACK_READING_STATS, &CrossPointSettings::trackReadingStats, "trackReadingStats",
                           StrId::STR_CAT_SYSTEM));
+  add(SettingInfo::Enum(StrId::STR_STATS_CATEGORY_LABEL, &CrossPointSettings::readingStatsCategoryLabel,
+                        {StrId::STR_STATS_LABEL_ARTICLES, StrId::STR_STATS_SHORT_READS}, "readingStatsCategoryLabel",
+                        StrId::STR_CAT_SYSTEM));
 
   // Frontlight quick-panel state: persisted + web-exposed, category-less so
   // it stays off the Settings screen (edited from the swipe-down panel).

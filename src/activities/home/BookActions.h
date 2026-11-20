@@ -30,6 +30,7 @@ std::vector<std::string> epubRenderModeOptions();
 uint8_t epubRenderModeDisplayIndex(uint8_t renderMode);
 uint8_t epubRenderModeForDisplayIndex(uint8_t displayIndex);
 std::string confirmationHeading(StrId actionLabelId);
+StrId toggleArticleLabel(bool isArticle);
 StrId toggleArticle(const std::string& fullPath);
 // Read-only, log-quiet variant for list rows: never migrates cache folders or
 // stats files, and skips books that have no cache folder.
