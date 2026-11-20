@@ -5304,7 +5304,10 @@ void EpubReaderActivity::startClipSelection(const DictionaryClippingRequest* dic
           if (previousBlockIndex + 1 == i && !block.wordHasSpaceBefore(i)) {
             // Publishers can also use CSS inline padding as a visible separator.
             const auto& previous = wordStore.words.back();
-            word.attachedToPrevious = word.x <= previous.x + previous.w + 2 && previous.x <= word.x + word.w + 2;
+            // Tracking applies between the fragments as well as within each word.
+            const int tolerance = 2 + (std::max<int>(0, block.getCharacterSpacing()) + 1) / 2;
+            word.attachedToPrevious =
+                word.x <= previous.x + previous.w + tolerance && previous.x <= word.x + word.w + tolerance;
           }
           previousBlockIndex = i;
           wordStore.words.push_back(word);

@@ -305,16 +305,17 @@ void ClippingSelectionSmokeTest::verifySavedHighlightSpacing(EpubReaderActivity&
   const size_t clippingIndex = CLIPPINGS.clippingCount();
   require(reader.section && reader.section->pageCount > 0, "Missing highlight test section");
   const auto currentPage = static_cast<uint16_t>(reader.section->currentPage);
-  require(CLIPPINGS.addClipping(reader.currentSpineIndex, currentPage, currentPage, reader.section->pageCount, 4, 10, 7,
-                                "", UINT16_MAX, "Synthetic spacing regression", UINT16_MAX,
-                                clippingWordLayoutSignature(reader.section->layoutSignature())) ==
-              ClippingStore::AddResult::Added,
-          "Could not save highlight test range");
   for (const uint8_t spacing : {70, 100, 200}) {
     for (const bool explicitHeight : {false, true}) {
       size_t erasedPixels = 0;
       {
         RenderLock lock;
+        // Keep the real reader redraw from resolving this synthetic range against its own page.
+        require(CLIPPINGS.addClipping(reader.currentSpineIndex, currentPage, currentPage, reader.section->pageCount, 4,
+                                      10, 7, "", UINT16_MAX, "Synthetic spacing regression", UINT16_MAX,
+                                      clippingWordLayoutSignature(reader.section->layoutSignature())) ==
+                    ClippingStore::AddResult::Added,
+                "Could not save highlight test range");
         SETTINGS.lineHeightPercent = spacing;
         const int lineHeight = std::max(1, (fontHeight * spacing + 50) / 100);
         Page page;
@@ -354,6 +355,7 @@ void ClippingSelectionSmokeTest::verifySavedHighlightSpacing(EpubReaderActivity&
           }
         }
         require(markerPixels > 100, "Saved highlight was not drawn");
+        require(CLIPPINGS.removeClippingAt(clippingIndex), "Could not remove highlight test range");
       }
       char name[64];
       std::snprintf(name, sizeof(name), "clip-spacing-%u-%s", spacing, explicitHeight ? "explicit" : "default");
@@ -362,7 +364,6 @@ void ClippingSelectionSmokeTest::verifySavedHighlightSpacing(EpubReaderActivity&
       require(erasedPixels == 0, "Saved highlight erased a text pixel");
     }
   }
-  require(CLIPPINGS.removeClippingAt(clippingIndex), "Could not remove highlight test range");
   SETTINGS.lineHeightPercent = oldSpacing;
   reader.requestUpdate();
 }
@@ -749,6 +750,7 @@ bool ClippingSelectionSmokeTest::tick() {
     case 80:
       require(activityManager.isHomeActivity(), "Could not leave the gesture fixture");
       SETTINGS.wordSpacing = WordSpacing::fromLevel(-4);
+      SETTINGS.characterSpacing = CrossPointSettings::MAX_CHARACTER_SPACING;
       SETTINGS.paragraphAlignment = CrossPointSettings::LEFT_ALIGN;
       activityManager.goToReader("/clipping-spacing.epub", true);
       break;
