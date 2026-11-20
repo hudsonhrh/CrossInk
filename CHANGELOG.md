@@ -203,6 +203,8 @@
 
 ### Changed
 
+- Reading Stats calculates the seven-day average with fewer SD card reads, especially when several days share a monthly snapshot.
+
 - Warm upcoming EPUB text in short, input-interruptible idle slices on S3 readers using TTF fonts, without evicting cached glyphs or changing C3 font behavior.
 
 - SD fonts containing both BMP and supplementary Unicode ranges use less resident lookup-table memory, and TTF fonts validate faster while preserving font integrity checks.

@@ -67,7 +67,7 @@ bool monthFor(uint32_t day, uint32_t& first, uint8_t& count) {
 }
 // A corrupt slot can fall back; I/O errors and unknown versions must never be overwritten.
 bool readSlot(uint32_t first, uint8_t count, int slot, bool& exists, bool& valid, uint32_t& generation,
-              Counter* counters = nullptr, const Counter* synced = nullptr) {
+              Month* newest = nullptr, const Counter* synced = nullptr) {
   char path[64];
   monthPath(path, first, slot);
   exists = Storage.exists(path);
@@ -78,10 +78,12 @@ bool readSlot(uint32_t first, uint8_t count, int slot, bool& exists, bool& valid
     LOG_ERR("DailyStats", "Cannot read monthly snapshot: %s", path);
     return false;
   }
-  uint8_t data[12]{};
+  // A 64-byte scratch buffer batches eight on-disk counters per HAL read on both SD transports.
+  uint8_t data[64]{};
+  constexpr size_t headerSize = 12;
   const size_t size = file.fileSize();
-  const int n = file.read(data, sizeof(data));
-  if (n < 0 || (size == MONTH_BYTES && n != sizeof(data))) {
+  const int n = file.read(data, headerSize);
+  if (n < 0 || (size == MONTH_BYTES && n != headerSize)) {
     file.close();
     LOG_ERR("DailyStats", "Monthly header read failed: %s", path);
     return false;
@@ -91,22 +93,32 @@ bool readSlot(uint32_t first, uint8_t count, int slot, bool& exists, bool& valid
     LOG_ERR("DailyStats", "Refusing newer monthly snapshot: %s", path);
     return false;
   }
-  bool ok = size == MONTH_BYTES && n == sizeof(data) && data[0] == 2 && data[1] == 'D' && data[2] == 'R' &&
+  bool ok = size == MONTH_BYTES && n == headerSize && data[0] == 2 && data[1] == 'D' && data[2] == 'R' &&
             data[3] == 0 && le32(data + 4) == first;
   generation = le32(data + 8);
-  uint32_t hash = hashBytes(2166136261u, data, sizeof(data));
-  for (size_t i = 0; ok && i < 31; ++i) {
-    if (file.read(data, 8) != 8) {
+  if (newest && newest->slot >= 0) {
+    const uint32_t delta = generation - newest->generation;
+    if (delta == 0 || delta >= 0x80000000u) newest = nullptr;
+  }
+  uint32_t hash = hashBytes(2166136261u, data, headerSize);
+  constexpr size_t recordSize = 8;
+  for (size_t i = 0; ok && i < 31;) {
+    const size_t records = std::min(31 - i, sizeof(data) / recordSize);
+    const size_t bytes = records * recordSize;
+    if (file.read(data, bytes) != static_cast<int>(bytes)) {
       file.close();
       LOG_ERR("DailyStats", "Monthly record read failed: %s", path);
       return false;
     }
-    hash = hashBytes(hash, data, 8);
-    const Counter counter{le32(data), le32(data + 4)};
-    ok = ok && counter.uploaded <= counter.seconds && (i < count || (!counter.seconds && !counter.uploaded));
-    // Cleanup also proves that the newest acknowledgments cover every older total.
-    if (synced && counter.seconds > synced[i].uploaded) ok = false;
-    if (counters) counters[i] = counter;
+    hash = hashBytes(hash, data, bytes);
+    for (size_t j = 0; ok && j < records; ++j, ++i) {
+      const uint8_t* record = data + j * recordSize;
+      const Counter counter{le32(record), le32(record + 4)};
+      ok = counter.uploaded <= counter.seconds && (i < count || (!counter.seconds && !counter.uploaded));
+      // Cleanup also proves that the newest acknowledgments cover every older total.
+      if (synced && counter.seconds > synced[i].uploaded) ok = false;
+      if (newest) newest->days[i] = counter;
+    }
   }
   if (ok && file.read(data, 4) != 4) {
     file.close();
@@ -120,6 +132,10 @@ bool readSlot(uint32_t first, uint8_t count, int slot, bool& exists, bool& valid
     return false;
   }
   valid = ok;
+  if (newest) {
+    newest->slot = ok ? slot : -1;
+    newest->generation = generation;
+  }
   return true;
 }
 bool loadMonth(uint32_t first, uint8_t count, Month& month, bool convertingLegacy = false) {
@@ -128,15 +144,19 @@ bool loadMonth(uint32_t first, uint8_t count, Month& month, bool convertingLegac
   for (int slot = 0; slot < 2; ++slot) {
     bool exists, valid;
     uint32_t generation = 0;
-    if (!readSlot(first, count, slot, exists, valid, generation)) return false;
+    const int previous = month.slot;
+    if (!readSlot(first, count, slot, exists, valid, generation, &month)) return false;
     if (exists) existingSlots |= 1u << slot;
-    const uint32_t delta = generation - month.generation;
-    if (valid && (month.slot < 0 || (delta != 0 && delta < 0x80000000u))) {
-      month.generation = generation;
-      month.slot = slot;
+    // A newer candidate may have filled the shared buffer before failing its checksum.
+    // Only that recovery case needs to reopen the last valid slot.
+    if (previous >= 0 && month.slot < 0 &&
+        (!readSlot(first, count, previous, exists, valid, generation, &month) || !valid)) {
+      LOG_ERR("DailyStats", "Monthly snapshot changed while reading");
+      return false;
     }
   }
   if (month.slot < 0) {
+    month = {};  // A torn candidate can leave partial counters in the shared buffer.
     // Conversion starts with slot a and cannot delete sources until b is verified.
     // An interrupted first snapshot can therefore be rebuilt from the intact legacy month.
     if (convertingLegacy && existingSlots == 1) return true;
@@ -145,11 +165,6 @@ bool loadMonth(uint32_t first, uint8_t count, Month& month, bool convertingLegac
     if (existingSlots == 2) return true;
     if (existingSlots) LOG_ERR("DailyStats", "No valid monthly snapshot");
     return !existingSlots;
-  }
-  bool exists, valid;
-  if (!readSlot(first, count, month.slot, exists, valid, month.generation, month.days) || !valid) {
-    LOG_ERR("DailyStats", "Monthly snapshot changed while reading");
-    return false;
   }
   return true;
 }
@@ -375,6 +390,35 @@ bool save(Cache& c) {
   c.dirty = 0;
   return true;
 }
+// A summary reuses the same bounded month buffer as a single-day read. Keep it local
+// to the operation so a later query always sees new checkpoints and migration results.
+struct MonthReader {
+  Month month;
+  uint32_t first = 0;
+  uint8_t days = 0;
+
+  bool read(uint32_t day, Counter& counter) {
+    counter = {};
+    if (day - first >= days) {
+      uint8_t count;
+      days = 0;
+      if (!prepareDirectory() || !monthFor(day, first, count) || !migrateMonth(first, count) ||
+          !loadMonth(first, count, month)) {
+        return false;
+      }
+      days = count;
+    }
+    counter = month.days[day - first];
+    return true;
+  }
+};
+
+bool cachedCounter(uint32_t day, Counter& counter) {
+  const auto found = std::find_if(std::begin(cache), std::end(cache), [day](const Cache& c) { return c.day == day; });
+  if (found == std::end(cache)) return false;
+  counter = found->counter;
+  return true;
+}
 }  // namespace
 
 #ifdef DAILY_READING_STATS_TEST
@@ -388,15 +432,8 @@ void resetForTest() {
 #endif
 
 bool read(uint32_t day, Counter& counter) {
-  counter = {};
-  if (!prepareDirectory()) return false;
-  uint32_t first;
-  uint8_t count;
-  if (!monthFor(day, first, count) || !migrateMonth(first, count)) return false;
-  Month month;
-  if (!loadMonth(first, count, month)) return false;
-  counter = month.days[day - first];
-  return true;
+  MonthReader reader;
+  return reader.read(day, counter);
 }
 
 bool write(uint32_t day, const Counter& counter) {
@@ -523,35 +560,31 @@ bool counterId(StatsCounterId& id) {
 }
 
 bool secondsFor(uint32_t day, uint32_t& seconds) {
-  seconds = 0;
-  const auto found = std::find_if(std::begin(cache), std::end(cache), [day](const Cache& c) { return c.day == day; });
-  if (found != std::end(cache)) {
-    seconds = found->counter.seconds;
-    return true;
-  }
   Counter counter;
-  if (!read(day, counter)) return false;
-  seconds = counter.seconds;
-  return true;
+  const bool ok = cachedCounter(day, counter) || read(day, counter);
+  seconds = ok ? counter.seconds : 0;
+  return ok;
 }
 
 Summary summarize(uint32_t today) {
   constexpr uint32_t days = 7;
   Summary summary;
   uint64_t total = 0;
+  MonthReader reader;
   summary.hasSevenDayAverage = today + 1 >= days;
   for (uint32_t offset = 0; offset < days && offset <= today; ++offset) {
-    uint32_t seconds = 0;
-    if (!secondsFor(today - offset, seconds)) {
-      LOG_ERR("DailyStats", "Cannot read daily counter for day %lu", static_cast<unsigned long>(today - offset));
+    const uint32_t day = today - offset;
+    Counter counter;
+    if (!cachedCounter(day, counter) && !reader.read(day, counter)) {
+      LOG_ERR("DailyStats", "Cannot read daily counter for day %lu", static_cast<unsigned long>(day));
       summary.hasSevenDayAverage = false;
       continue;
     }
     if (offset == 0) {
       summary.hasToday = true;
-      summary.todaySeconds = seconds;
+      summary.todaySeconds = counter.seconds;
     }
-    total += seconds;
+    total += counter.seconds;
   }
   summary.sevenDayAverageSeconds = static_cast<uint32_t>(total / days);
   return summary;
