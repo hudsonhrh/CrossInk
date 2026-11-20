@@ -37,6 +37,7 @@
 
 ### Changed
 
+- Cycle through up to three recent books on Dashboard Home. Swipe left on a touchscreen or hold the front Back button on a button reader.
 - `Settings > System > KOReader Sync` is now `Sync Server`. Reading Stats and Clippings are opt-in under `What to Sync` and require server support.
 - English is the only built-in interface language. Download other languages through Language settings. On PSRAM-equipped devices with small factory data partitions, including X4 Pro, language and hyphenation packs can use an SD cache without repartitioning.
 - Battery display is now set per status bar and carries over the old Hide Battery % preference.
