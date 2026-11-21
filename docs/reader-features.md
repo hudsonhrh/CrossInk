@@ -322,7 +322,7 @@ Tracked stats include:
 - Number of sessions
 - Pages turned
 - Average session time
-- All-time totals, including total books read
+- Books read, with a separate count after you first mark an EPUB as a short read
 - Reading time for each day, with today's total and a 7-day average on the
   **This Device** stats page
 
@@ -335,6 +335,23 @@ sleep screen, including **Minimal Stats**.
 > have one, so it shows less detailed stats than the X3.
 
 For two-device syncing, see [Reading Stats Sync](./reading-stats-sync.md).
+
+### Count an EPUB as a short read
+
+Long-press the EPUB in **Library** or **Browse Files** and choose **Mark as
+Short Read**. While reading, the same action is under **Reader Menu > Settings**.
+Reading Stats shows **Books Read** by default. Marking your first short read
+reveals **Short Reads**, even if you have yet to finish it. The title also
+appears as a short read on its own stats page. Finishing it adds one to
+**Short Reads**. Changing the type of a title that already counted as finished
+moves its completion between categories. Choose **Mark as Book** to switch it
+back. Both counts stay visible until you reset that reading history. Books and
+short reads both contribute to reading time, sessions, and streaks.
+
+If you prefer **Articles**, open **Settings > System > Reading Stats** and
+change **Article Label**. The action becomes **Mark as Article** and the stats
+screen calls the same count **Articles Read**. The wording is personal to this
+reader, and updates preserve your saved choice.
 
 ### Turn tracking on or off
 

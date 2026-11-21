@@ -65,9 +65,17 @@ bool monthFor(uint32_t day, uint32_t& first, uint8_t& count) {
   count = daysInMonth(date.year, date.month);
   return true;
 }
+ReadingStatsDate monthsBefore(const ReadingStatsDate& date, unsigned months) {
+  const unsigned monthIndex = (date.year - 2000) * 12u + date.month - 1;
+  if (months > monthIndex) return {};
+  const unsigned previous = monthIndex - months;
+  const auto year = static_cast<uint16_t>(2000 + previous / 12);
+  const auto month = static_cast<uint8_t>(1 + previous % 12);
+  return {year, month, std::min(date.day, daysInMonth(year, month))};
+}
 // A corrupt slot can fall back; I/O errors and unknown versions must never be overwritten.
 bool readSlot(uint32_t first, uint8_t count, int slot, bool& exists, bool& valid, uint32_t& generation,
-              Counter* counters = nullptr, const Counter* synced = nullptr) {
+              Month* newest = nullptr, const Counter* synced = nullptr) {
   char path[64];
   monthPath(path, first, slot);
   exists = Storage.exists(path);
@@ -78,10 +86,12 @@ bool readSlot(uint32_t first, uint8_t count, int slot, bool& exists, bool& valid
     LOG_ERR("DailyStats", "Cannot read monthly snapshot: %s", path);
     return false;
   }
-  uint8_t data[12]{};
+  // A 64-byte scratch buffer batches eight on-disk counters per HAL read on both SD transports.
+  uint8_t data[64]{};
+  constexpr size_t headerSize = 12;
   const size_t size = file.fileSize();
-  const int n = file.read(data, sizeof(data));
-  if (n < 0 || (size == MONTH_BYTES && n != sizeof(data))) {
+  const int n = file.read(data, headerSize);
+  if (n < 0 || (size == MONTH_BYTES && n != headerSize)) {
     file.close();
     LOG_ERR("DailyStats", "Monthly header read failed: %s", path);
     return false;
@@ -91,22 +101,32 @@ bool readSlot(uint32_t first, uint8_t count, int slot, bool& exists, bool& valid
     LOG_ERR("DailyStats", "Refusing newer monthly snapshot: %s", path);
     return false;
   }
-  bool ok = size == MONTH_BYTES && n == sizeof(data) && data[0] == 2 && data[1] == 'D' && data[2] == 'R' &&
+  bool ok = size == MONTH_BYTES && n == headerSize && data[0] == 2 && data[1] == 'D' && data[2] == 'R' &&
             data[3] == 0 && le32(data + 4) == first;
   generation = le32(data + 8);
-  uint32_t hash = hashBytes(2166136261u, data, sizeof(data));
-  for (size_t i = 0; ok && i < 31; ++i) {
-    if (file.read(data, 8) != 8) {
+  if (newest && newest->slot >= 0) {
+    const uint32_t delta = generation - newest->generation;
+    if (delta == 0 || delta >= 0x80000000u) newest = nullptr;
+  }
+  uint32_t hash = hashBytes(2166136261u, data, headerSize);
+  constexpr size_t recordSize = 8;
+  for (size_t i = 0; ok && i < 31;) {
+    const size_t records = std::min(31 - i, sizeof(data) / recordSize);
+    const size_t bytes = records * recordSize;
+    if (file.read(data, bytes) != static_cast<int>(bytes)) {
       file.close();
       LOG_ERR("DailyStats", "Monthly record read failed: %s", path);
       return false;
     }
-    hash = hashBytes(hash, data, 8);
-    const Counter counter{le32(data), le32(data + 4)};
-    ok = ok && counter.uploaded <= counter.seconds && (i < count || (!counter.seconds && !counter.uploaded));
-    // Cleanup also proves that the newest acknowledgments cover every older total.
-    if (synced && counter.seconds > synced[i].uploaded) ok = false;
-    if (counters) counters[i] = counter;
+    hash = hashBytes(hash, data, bytes);
+    for (size_t j = 0; ok && j < records; ++j, ++i) {
+      const uint8_t* record = data + j * recordSize;
+      const Counter counter{le32(record), le32(record + 4)};
+      ok = counter.uploaded <= counter.seconds && (i < count || (!counter.seconds && !counter.uploaded));
+      // Cleanup also proves that the newest acknowledgments cover every older total.
+      if (synced && counter.seconds > synced[i].uploaded) ok = false;
+      if (newest) newest->days[i] = counter;
+    }
   }
   if (ok && file.read(data, 4) != 4) {
     file.close();
@@ -120,6 +140,10 @@ bool readSlot(uint32_t first, uint8_t count, int slot, bool& exists, bool& valid
     return false;
   }
   valid = ok;
+  if (newest) {
+    newest->slot = ok ? slot : -1;
+    newest->generation = generation;
+  }
   return true;
 }
 bool loadMonth(uint32_t first, uint8_t count, Month& month, bool convertingLegacy = false) {
@@ -128,15 +152,19 @@ bool loadMonth(uint32_t first, uint8_t count, Month& month, bool convertingLegac
   for (int slot = 0; slot < 2; ++slot) {
     bool exists, valid;
     uint32_t generation = 0;
-    if (!readSlot(first, count, slot, exists, valid, generation)) return false;
+    const int previous = month.slot;
+    if (!readSlot(first, count, slot, exists, valid, generation, &month)) return false;
     if (exists) existingSlots |= 1u << slot;
-    const uint32_t delta = generation - month.generation;
-    if (valid && (month.slot < 0 || (delta != 0 && delta < 0x80000000u))) {
-      month.generation = generation;
-      month.slot = slot;
+    // A newer candidate may have filled the shared buffer before failing its checksum.
+    // Only that recovery case needs to reopen the last valid slot.
+    if (previous >= 0 && month.slot < 0 &&
+        (!readSlot(first, count, previous, exists, valid, generation, &month) || !valid)) {
+      LOG_ERR("DailyStats", "Monthly snapshot changed while reading");
+      return false;
     }
   }
   if (month.slot < 0) {
+    month = {};  // A torn candidate can leave partial counters in the shared buffer.
     // Conversion starts with slot a and cannot delete sources until b is verified.
     // An interrupted first snapshot can therefore be rebuilt from the intact legacy month.
     if (convertingLegacy && existingSlots == 1) return true;
@@ -145,11 +173,6 @@ bool loadMonth(uint32_t first, uint8_t count, Month& month, bool convertingLegac
     if (existingSlots == 2) return true;
     if (existingSlots) LOG_ERR("DailyStats", "No valid monthly snapshot");
     return !existingSlots;
-  }
-  bool exists, valid;
-  if (!readSlot(first, count, month.slot, exists, valid, month.generation, month.days) || !valid) {
-    LOG_ERR("DailyStats", "Monthly snapshot changed while reading");
-    return false;
   }
   return true;
 }
@@ -237,7 +260,7 @@ bool digits(const char* name, size_t n, uint32_t& value) {
   }
   return true;
 }
-bool fileMonth(const char* name, uint32_t& first) {
+bool fileMonth(const char* name, uint32_t& first, bool legacyOnly) {
   const size_t length = strlen(name);
   uint32_t day;
   if (((length == 9 && strcmp(name + 5, ".bin") == 0) ||
@@ -247,7 +270,7 @@ bool fileMonth(const char* name, uint32_t& first) {
     return monthFor(day, first, count);
   }
   uint32_t year, month;
-  if (length != 13 || name[4] != '-' || name[7] != '.' || (name[8] != 'a' && name[8] != 'b') ||
+  if (legacyOnly || length != 13 || name[4] != '-' || name[7] != '.' || (name[8] != 'a' && name[8] != 'b') ||
       strcmp(name + 9, ".bin") != 0 || !digits(name, 4, year) || !digits(name + 5, 2, month))
     return false;
   const ReadingStatsDate date{static_cast<uint16_t>(year), static_cast<uint8_t>(month), 1};
@@ -257,7 +280,7 @@ bool fileMonth(const char* name, uint32_t& first) {
 }
 // Close the directory before migration, writes, or network work. Rescanning by month
 // keeps memory bounded and avoids invalidating a directory cursor during conversion.
-bool nextMonth(uint32_t after, uint32_t& first) {
+bool nextMonth(uint32_t after, uint32_t& first, bool legacyOnly = false) {
   first = UINT32_MAX;
   if (!Storage.exists(localDirectory.c_str())) return true;
   FsFile dir = Storage.open(localDirectory.c_str());
@@ -278,7 +301,8 @@ bool nextMonth(uint32_t after, uint32_t& first) {
       break;
     }
     uint32_t candidate;
-    if (fileMonth(name, candidate) && (after == UINT32_MAX || candidate > after)) first = std::min(first, candidate);
+    if (fileMonth(name, candidate, legacyOnly) && (after == UINT32_MAX || candidate > after))
+      first = std::min(first, candidate);
   }
   ok = ok && !FsHelpers::directoryIterationFailed(dir);
   dir.close();
@@ -375,6 +399,52 @@ bool save(Cache& c) {
   c.dirty = 0;
   return true;
 }
+bool pendingDayMask(uint32_t first, uint8_t count, uint32_t& mask) {
+  if (!migrateMonth(first, count)) return false;
+  Month month;
+  if (!loadMonth(first, count, month)) return false;
+  mask = 0;
+  for (uint8_t i = 0; i < count; ++i) {
+    if (month.days[i].seconds != month.days[i].uploaded) mask |= uint32_t{1} << i;
+  }
+  return true;
+}
+
+// A summary reuses the same bounded month buffer as a single-day read. Keep it local
+// to the operation so a later query always sees new checkpoints and migration results.
+struct MonthReader {
+  Month month;
+  uint32_t first = 0;
+  uint8_t days = 0;
+
+  bool read(uint32_t day, Counter& counter) {
+    counter = {};
+    if (day - first >= days) {
+      uint8_t count;
+      days = 0;
+      if (!prepareDirectory() || !monthFor(day, first, count) || !migrateMonth(first, count) ||
+          !loadMonth(first, count, month)) {
+        return false;
+      }
+      days = count;
+    }
+    counter = month.days[day - first];
+    return true;
+  }
+
+  bool secondsFor(uint32_t day, uint32_t& seconds) {
+    seconds = 0;
+    const auto found = std::find_if(std::begin(cache), std::end(cache), [day](const Cache& c) { return c.day == day; });
+    if (found != std::end(cache)) {
+      seconds = found->counter.seconds;
+      return true;
+    }
+    Counter counter;
+    if (!read(day, counter)) return false;
+    seconds = counter.seconds;
+    return true;
+  }
+};
 }  // namespace
 
 #ifdef DAILY_READING_STATS_TEST
@@ -388,15 +458,8 @@ void resetForTest() {
 #endif
 
 bool read(uint32_t day, Counter& counter) {
-  counter = {};
-  if (!prepareDirectory()) return false;
-  uint32_t first;
-  uint8_t count;
-  if (!monthFor(day, first, count) || !migrateMonth(first, count)) return false;
-  Month month;
-  if (!loadMonth(first, count, month)) return false;
-  counter = month.days[day - first];
-  return true;
+  MonthReader reader;
+  return reader.read(day, counter);
 }
 
 bool write(uint32_t day, const Counter& counter) {
@@ -437,8 +500,11 @@ bool uploadPending(bool (*upload)(void*, uint32_t, uint32_t), void* context) {
     if (first == UINT32_MAX) return true;
     uint8_t count;
     uint32_t unused;
-    if (!monthFor(first, unused, count)) return false;
+    // Check retained, acknowledged months only once. Keep the month buffer off the stack during network I/O.
+    uint32_t pending;
+    if (!monthFor(first, unused, count) || !pendingDayMask(first, count, pending)) return false;
     for (uint8_t i = 0; i < count; ++i) {
+      if (!(pending & (uint32_t{1} << i))) continue;
       Counter counter;
       if (!read(first + i, counter)) return false;
       if (counter.seconds == counter.uploaded) continue;
@@ -450,20 +516,14 @@ bool uploadPending(bool (*upload)(void*, uint32_t, uint32_t), void* context) {
   }
 }
 
-bool pruneSyncedMonths(const ReadingStatsDate& today) {
+bool pruneSyncedMonths(const ReadingStatsDate& today, uint8_t priorMonthsToKeep) {
   if (!today.isValid()) {
     LOG_ERR("DailyStats", "Skipping cleanup without a valid local date");
     return false;
   }
-  ReadingStatsDate previous{today.year, today.month, 1};
-  if (previous.month == 1) {
-    if (previous.year == 2000) return true;
-    --previous.year;
-    previous.month = 12;
-  } else {
-    --previous.month;
-  }
-  const uint32_t keepFrom = readingStatsDayIndex(previous);
+  const ReadingStatsDate oldest = monthsBefore({today.year, today.month, 1}, priorMonthsToKeep);
+  if (!oldest.isValid()) return true;  // All supported dates are retained.
+  const uint32_t keepFrom = readingStatsDayIndex(oldest);
   // Accepted but uncheckpointed time must participate in the retention decision.
   if (!prepareDirectory() || !flush()) return false;
   bool ok = true;
@@ -523,26 +583,69 @@ bool counterId(StatsCounterId& id) {
 }
 
 bool secondsFor(uint32_t day, uint32_t& seconds) {
-  seconds = 0;
-  const auto found = std::find_if(std::begin(cache), std::end(cache), [day](const Cache& c) { return c.day == day; });
-  if (found != std::end(cache)) {
-    seconds = found->counter.seconds;
-    return true;
+  MonthReader reader;
+  return reader.secondsFor(day, seconds);
+}
+
+size_t sixMonthDayCount(const ReadingStatsDate& today) {
+  if (!today.isValid()) return 0;
+  const ReadingStatsDate cutoff = monthsBefore(today, 6);
+  const uint32_t end = readingStatsDayIndex(today);
+  return cutoff.isValid() ? end - readingStatsDayIndex(cutoff) : end + 1;
+}
+
+bool loadWindow(const ReadingStatsDate& today, uint32_t* seconds, size_t count) {
+  if (!today.isValid() || !seconds || !count || count > MAX_SIX_MONTH_DAYS) return false;
+  if (!prepareDirectory()) return false;
+  const uint32_t end = readingStatsDayIndex(today);
+  // Before the epoch, pad a fixed-length chart with empty days.
+  const size_t validDays = std::min<size_t>(count, end + 1);
+  std::fill_n(seconds, count - validDays, 0u);
+  uint32_t* const datedSeconds = seconds + (count - validDays);
+  const uint32_t start = end + 1 - validDays;
+  uint32_t first;
+  uint8_t monthDays;
+  if (!monthFor(start, first, monthDays)) return false;
+  // A single name scan avoids probing three possible legacy filenames for every day of a modern history.
+  uint32_t legacyMonth;
+  if (!nextMonth(first ? first - 1 : UINT32_MAX, legacyMonth, true)) return false;
+  for (uint32_t day = start; day <= end;) {
+    if (first >= legacyMonth && !migrateMonth(first, monthDays)) return false;
+    Month month;
+    if (!loadMonth(first, monthDays, month)) return false;
+    const uint32_t next = std::min(end + 1, first + monthDays);
+    for (; day < next; ++day) datedSeconds[day - start] = month.days[day - first].seconds;
+    if (day <= end && !monthFor(day, first, monthDays)) return false;
   }
-  Counter counter;
-  if (!read(day, counter)) return false;
-  seconds = counter.seconds;
+  for (const Cache& c : cache) {
+    if (c.day >= start && c.day <= end) datedSeconds[c.day - start] = c.counter.seconds;
+  }
   return true;
 }
 
-Summary summarize(uint32_t today) {
+WindowSummary summarizeWindow(const uint32_t* seconds, size_t count) {
+  WindowSummary summary;
+  uint64_t total = 0;
+  for (size_t i = 0; i < count; ++i) {
+    total += seconds[i];
+    if (seconds[i]) ++summary.activeDays;
+    summary.peakSeconds = std::max(summary.peakSeconds, seconds[i]);
+  }
+  summary.totalSeconds = static_cast<uint32_t>(std::min<uint64_t>(total, UINT32_MAX));
+  return summary;
+}
+
+Summary summarize(uint32_t today, const uint32_t* windowSeconds, size_t windowDays) {
   constexpr uint32_t days = 7;
   Summary summary;
   uint64_t total = 0;
+  MonthReader reader;
   summary.hasSevenDayAverage = today + 1 >= days;
   for (uint32_t offset = 0; offset < days && offset <= today; ++offset) {
     uint32_t seconds = 0;
-    if (!secondsFor(today - offset, seconds)) {
+    if (windowSeconds && offset < windowDays) {
+      seconds = windowSeconds[windowDays - 1 - offset];
+    } else if (!reader.secondsFor(today - offset, seconds)) {
       LOG_ERR("DailyStats", "Cannot read daily counter for day %lu", static_cast<unsigned long>(today - offset));
       summary.hasSevenDayAverage = false;
       continue;

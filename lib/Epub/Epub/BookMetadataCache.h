@@ -84,6 +84,17 @@ class BookMetadataCache {
   bool lowMemoryFailure = false;
 
   static constexpr uint16_t LARGE_SPINE_THRESHOLD = 300;
+  // Below the large-book threshold, index rows as TOC lookups first visit them.
+  // Verify the href on disk for each matching fingerprint, in original spine order.
+  struct SpineRow {
+    uint32_t hash;
+    uint32_t offset;
+  };
+  std::unique_ptr<SpineRow[]> spineRows;
+  uint16_t indexedRows = 0;
+  uint32_t nextRowOffset = 0;
+  bool tocReadFailed = false;
+  bool findSpineRow(const std::string& href, int16_t& index);
 
   // FNV-1a 64-bit hash function
   static uint64_t fnvHash64(const std::string& s) {
@@ -97,8 +108,8 @@ class BookMetadataCache {
 
   uint32_t writeSpineEntry(HalFile& file, const SpineEntry& entry) const;
   uint32_t writeTocEntry(HalFile& file, const TocEntry& entry) const;
-  SpineEntry readSpineEntry(HalFile& file) const;
-  TocEntry readTocEntry(HalFile& file) const;
+  bool writeBookData(const std::string& epubPath, const BookMetadata& metadata);
+  bool seekToEntry(size_t index);
   void cacheSpineCumulativeSizes();
 
  public:

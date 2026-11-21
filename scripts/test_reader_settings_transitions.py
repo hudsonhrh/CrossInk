@@ -92,6 +92,8 @@ struct Settings {
 struct Stats {
   uint32_t totalReadingSeconds = 100, sessionCount = 1, totalSessions = 1;
   uint32_t spanSeconds = 0, savedSeconds = 0, completedBooks = 0, estimatedTimeLeftSeconds = 0;
+  uint32_t completedArticles = 0, unassignedLegacyBooks = 0, completionCounterId = 0;
+  bool articleMarked = false, isArticle = false, completionCredited = false, legacyCompletion = false;
   int saves = 0;
   bool saveFails = false, startDateManual = false, finishedDateManual = false, isCompleted = false;
   Date startDate, finishedDate;
@@ -425,6 +427,8 @@ template <typename Reader> void checkPanelReload(bool globalReset) {
   Stats::diskBook.isCompleted = true;
   Stats::diskGlobal.totalReadingSeconds = 400;  // Older on-disk copy.
   Stats::diskGlobal.completedBooks = 4;
+  Stats::diskGlobal.completedArticles = 2;
+  Stats::diskGlobal.articleMarked = true;
   if (globalReset) {
     Stats::diskGlobal = Stats{};
     Stats::diskGlobal.totalReadingSeconds = 0;
@@ -435,6 +439,8 @@ template <typename Reader> void checkPanelReload(bool globalReset) {
   assert(reader.stats.startDate.value == 5 && reader.stats.isCompleted);
   assert(reader.globalStats.totalReadingSeconds == (globalReset ? 0 : 500));
   assert(reader.globalStats.completedBooks == (globalReset ? 0 : 4));
+  assert(reader.globalStats.completedArticles == (globalReset ? 0 : 2));
+  assert(reader.globalStats.articleMarked == !globalReset);
   reader.finalizeReadingStatsOnExit();
   assert(Stats::diskBook.totalReadingSeconds == 220 && Stats::diskBook.startDate.value == 5);
   assert(Stats::diskGlobal.totalReadingSeconds == (globalReset ? 120 : 620));
@@ -470,10 +476,14 @@ void checkXtcStatsScreenReturn() {
   Stats::diskBook.totalReadingSeconds = 220;  // Preview copy with the session.
   Stats::diskBook.startDate.value = 7;
   Stats::diskGlobal.completedBooks = 3;
+  Stats::diskGlobal.completedArticles = 1;
+  Stats::diskGlobal.articleMarked = true;
   Stats::diskGlobal.totalReadingSeconds = 999;
   reader.applyBookStatsEditsFromDisk();
   assert(reader.stats.totalReadingSeconds == 100 && reader.stats.startDate.value == 7);
-  assert(reader.globalStats.completedBooks == 3 && reader.globalStats.totalReadingSeconds == 100);
+  assert(reader.globalStats.completedBooks == 3 && reader.globalStats.completedArticles == 1);
+  assert(reader.globalStats.articleMarked);
+  assert(reader.globalStats.totalReadingSeconds == 100);
   reader.finalizeReadingStatsOnExit();
   assert(Stats::diskBook.totalReadingSeconds == 220);
 }
@@ -572,6 +582,7 @@ def main():
     session = "src/activities/reader/ReadingSessionStats.cpp"
     methods += method(session, "void commitReadingSession(")
     methods += method(session, "void importBookStatsEdits(")
+    methods += method(session, "void importGlobalCompletionEdits(")
     methods += method(session, "void refreshGlobalStatsAfterOverlay(")
     methods += method("src/activities/reader/ReadingStatsUtils.cpp", "bool readingStatsIntervalSeconds(")
     for reader in ("EpubReaderActivity", "XtcReaderActivity"):

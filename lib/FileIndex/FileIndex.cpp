@@ -1,6 +1,7 @@
 #include "FileIndex.h"
 
 #include <Arduino.h>
+#include <AtomicFile.h>
 #include <FsHelpers.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -10,6 +11,12 @@
 #include <cstring>
 
 namespace {
+const atomic_file::Operations indexFileOps{
+    nullptr,
+    [](void*, const char* path) { return Storage.exists(path); },
+    [](void*, const char* path) { return Storage.remove(path); },
+    [](void*, const char* from, const char* to) { return Storage.rename(from, to); },
+};
 constexpr const char* INDEX_ROOT = "/.crosspoint";
 constexpr const char* INDEX_DIR = "/.crosspoint/fileindex";
 constexpr char MAGIC[4] = {'C', 'P', 'F', 'I'};
@@ -37,6 +44,11 @@ uint64_t fnv1a64(const char* s) {
     hash *= 1099511628211ULL;
   }
   return hash;
+}
+
+bool finishOutput(HalFile& file) {
+  const bool synced = file.sync();
+  return file.close() && synced;
 }
 
 void maybeYield(uint32_t& counter) {
@@ -80,12 +92,19 @@ bool FileIndex::open(const char* dirPath, AcceptFn accept) {
     return false;
   }
 
+  snprintf(idxPath, sizeof(idxPath), "%s/%016llx.idx", INDEX_DIR, static_cast<unsigned long long>(fnv1a64(dirPath)));
+  char backupPath[sizeof(idxPath) + 4];
+  snprintf(backupPath, sizeof(backupPath), "%s.bak", idxPath);
+  if (!atomic_file::recover(indexFileOps, idxPath, backupPath)) {
+    LOG_ERR("FIDX", "cannot recover previous index: %s", idxPath);
+    return false;
+  }
   if (loadExisting(dirPath, signature, dirs, files)) {
     return true;
   }
 
   LOG_INF("FIDX", "building index for %s (%u dirs, %u files)", dirPath, dirs, files);
-  return build(dirPath, accept, signature, dirs, files);
+  return build(dirPath, backupPath, accept, signature, dirs, files);
 }
 
 void FileIndex::close() {
@@ -146,8 +165,6 @@ bool FileIndex::scanDirectory(const char* dirPath, AcceptFn accept, uint32_t& si
 }
 
 bool FileIndex::loadExisting(const char* dirPath, uint32_t signature, uint32_t dirs, uint32_t files) {
-  snprintf(idxPath, sizeof(idxPath), "%s/%016llx.idx", INDEX_DIR, static_cast<unsigned long long>(fnv1a64(dirPath)));
-
   auto file = Storage.open(idxPath);
   if (!file) return false;
 
@@ -203,7 +220,8 @@ bool FileIndex::flushChunk(BuildState& bs) {
   return true;
 }
 
-bool FileIndex::build(const char* dirPath, AcceptFn accept, uint32_t signature, uint32_t dirs, uint32_t files) {
+bool FileIndex::build(const char* dirPath, const char* backupPath, AcceptFn accept, uint32_t signature, uint32_t dirs,
+                      uint32_t files) {
   if (!Storage.ensureDirectoryExists(INDEX_ROOT) || !Storage.ensureDirectoryExists(INDEX_DIR)) {
     LOG_ERR("FIDX", "cannot create %s", INDEX_DIR);
     return false;
@@ -243,6 +261,8 @@ bool FileIndex::build(const char* dirPath, AcceptFn accept, uint32_t signature, 
   bs.runsOut = Storage.open(bs.runsPathA, O_RDWR | O_CREAT | O_TRUNC);
   if (!bs.idxTmp || !bs.runsOut) {
     LOG_ERR("FIDX", "cannot open scratch files");
+    if (bs.idxTmp) bs.idxTmp.close();
+    if (bs.runsOut) bs.runsOut.close();
     cleanupScratch();
     return false;
   }
@@ -312,8 +332,7 @@ bool FileIndex::build(const char* dirPath, AcceptFn accept, uint32_t signature, 
   }
   ok = ok && sig == signature && dirCount == dirs && fileCount == files;
   ok = ok && flushChunk(bs);
-  bs.runsOut.flush();
-  bs.runsOut.close();
+  ok = finishOutput(bs.runsOut) && ok;
 
   const uint32_t recordCount = dirCount + fileCount;
   ok = ok && mergeRuns(bs, recordCount);
@@ -330,9 +349,8 @@ bool FileIndex::build(const char* dirPath, AcceptFn accept, uint32_t signature, 
     newHdr.blobLen = bs.blobLen;
     newHdr.offsetsStart = blobStart + bs.blobLen;
     ok = bs.idxTmp.seek(0) && bs.idxTmp.write(&newHdr, sizeof(newHdr)) == sizeof(newHdr);
-    bs.idxTmp.flush();
   }
-  bs.idxTmp.close();
+  ok = finishOutput(bs.idxTmp) && ok;
 
   if (!ok) {
     LOG_ERR("FIDX", "index build failed for %s", dirPath);
@@ -340,9 +358,8 @@ bool FileIndex::build(const char* dirPath, AcceptFn accept, uint32_t signature, 
     return false;
   }
 
-  Storage.remove(idxPath);
-  if (!Storage.rename(bs.tmpPath, idxPath)) {
-    LOG_ERR("FIDX", "rename to %s failed", idxPath);
+  if (!atomic_file::publish(indexFileOps, idxPath, bs.tmpPath, backupPath)) {
+    LOG_ERR("FIDX", "cannot publish index: %s", idxPath);
     cleanupScratch();
     return false;
   }
@@ -383,9 +400,17 @@ bool FileIndex::mergeRuns(BuildState& bs, uint32_t recordCount) {
       return false;
     }
 
-    auto readRunRecordAt = [&in](uint32_t index, RunRecord& rec) {
-      const size_t pos = static_cast<size_t>(index) * sizeof(RunRecord);
-      return in.seek(pos) && in.read(&rec, sizeof(rec)) == static_cast<int>(sizeof(rec));
+    // Share the existing 2 KiB sort buffer between two input sectors and
+    // a write buffer. Alternating runs then costs a seek per sector.
+    constexpr uint32_t inputEntries = CHUNK_ENTRIES / 4;
+    constexpr uint32_t outputEntries = CHUNK_ENTRIES - 2 * inputEntries;
+    RunRecord* left = bs.chunk.get();
+    RunRecord* right = left + inputEntries;
+    RunRecord* output = right + inputEntries;
+    const auto fillInput = [&](uint32_t first, uint32_t count, RunRecord* buffer) {
+      const size_t bytes = std::min(count, inputEntries) * sizeof(RunRecord);
+      return in.seek(static_cast<size_t>(first) * sizeof(RunRecord)) &&
+             in.read(buffer, bytes) == static_cast<int>(bytes);
     };
 
     bool ok = true;
@@ -412,38 +437,37 @@ bool FileIndex::mergeRuns(BuildState& bs, uint32_t recordCount) {
       const uint32_t lenB = std::min(runLen, recordCount - startB);
       uint32_t ia = 0;
       uint32_t ib = 0;
-      bool haveA = false;
-      bool haveB = false;
-      RunRecord recA{};
-      RunRecord recB{};
-
+      uint32_t nextA = 0;
+      uint32_t nextB = 0;
+      size_t used = 0;
       while (ok && (ia < lenA || ib < lenB)) {
-        if (!haveA && ia < lenA) {
-          ok = readRunRecordAt(startA + ia, recA);
-          haveA = ok;
+        if (ia == nextA && ia < lenA) {
+          ok = fillInput(startA + ia, lenA - ia, left);
+          nextA += inputEntries;
         }
-        if (ok && !haveB && ib < lenB) {
-          ok = readRunRecordAt(startB + ib, recB);
-          haveB = ok;
+        if (ok && ib == nextB && ib < lenB) {
+          ok = fillInput(startB + ib, lenB - ib, right);
+          nextB += inputEntries;
         }
         if (!ok) break;
-
-        bool takeA;
-        if (haveA && haveB) {
+        const RunRecord& recA = left[ia % inputEntries];
+        const RunRecord& recB = right[ib % inputEntries];
+        bool takeA = ib == lenB;
+        if (ia < lenA && ib < lenB) {
           const int cmp = memcmp(recA.key, recB.key, sizeof(recA.key));
           takeA = cmp < 0 || (cmp == 0 && recA.blobOffset <= recB.blobOffset);
-        } else {
-          takeA = haveA;
         }
-
-        const RunRecord& rec = takeA ? recA : recB;
-        ok = out.write(&rec, sizeof(rec)) == sizeof(rec);
         if (takeA) {
-          haveA = false;
+          output[used++] = recA;
           ia++;
         } else {
-          haveB = false;
+          output[used++] = recB;
           ib++;
+        }
+        if (used == outputEntries || (ia == lenA && ib == lenB)) {
+          const size_t bytes = used * sizeof(RunRecord);
+          ok = out.write(output, bytes) == bytes;
+          used = 0;
         }
         maybeYield(bs.yieldCounter);
       }
@@ -451,8 +475,7 @@ bool FileIndex::mergeRuns(BuildState& bs, uint32_t recordCount) {
     }
 
     in.close();
-    out.flush();
-    out.close();
+    ok = finishOutput(out) && ok;
     if (!ok) return false;
 
     std::swap(inPath, outPath);
@@ -484,9 +507,20 @@ bool FileIndex::writeOffsets(BuildState& bs, uint32_t recordCount) {
   bool ok = true;
   uint32_t appendPos = bs.idxTmp.position();
 
-  auto readRunRecordAt = [&](uint32_t index, RunRecord& out) {
-    return run.seek(static_cast<size_t>(index) * sizeof(RunRecord)) &&
-           run.read(&out, sizeof(out)) == static_cast<int>(sizeof(out));
+  // Finding each tie group's boundary and then emitting that group consult
+  // the same sorted run. Retain a block in the now-idle merge scratch.
+  uint32_t firstCachedRun = UINT32_MAX;
+  const auto readRunRecordAt = [&](uint32_t index, RunRecord& out) {
+    const uint32_t first = index - index % CHUNK_ENTRIES;
+    if (first != firstCachedRun) {
+      const size_t bytes = std::min<size_t>(CHUNK_ENTRIES, recordCount - first) * sizeof(RunRecord);
+      if (!run.seek(static_cast<size_t>(first) * sizeof(RunRecord)) ||
+          run.read(bs.chunk.get(), bytes) != static_cast<int>(bytes))
+        return false;
+      firstCachedRun = first;
+    }
+    out = bs.chunk[index - first];
+    return true;
   };
 
   auto readTieOffsetAt = [](HalFile& file, uint32_t index, uint32_t& out) {
@@ -500,30 +534,32 @@ bool FileIndex::writeOffsets(BuildState& bs, uint32_t recordCount) {
     return true;
   };
 
-  auto offsetComesBefore = [&](uint32_t left, uint32_t right) {
-    if (!readNameAt(bs.idxTmp, left, bs.nameA.get(), NAME_BUF_SIZE) ||
-        !readNameAt(bs.idxTmp, right, bs.nameB.get(), NAME_BUF_SIZE)) {
-      ok = false;
-      return false;
-    }
-    const int cmp = FsHelpers::naturalCompare(bs.nameA.get(), bs.nameB.get());
-    return cmp < 0 || (cmp == 0 && left <= right);
-  };
-
   auto sortSegmentByName = [&](size_t segmentLen) {
-    bs.idxTmp.flush();
+    if (!bs.idxTmp.sync()) return false;
     for (size_t i = 1; ok && i < segmentLen; i++) {
       const uint32_t candidate = segment[i];
       ok = readNameAt(bs.idxTmp, candidate, bs.nameA.get(), NAME_BUF_SIZE);
-      size_t j = i;
-      while (ok && j > 0) {
-        ok = readNameAt(bs.idxTmp, segment[j - 1], bs.nameB.get(), NAME_BUF_SIZE);
-        const int cmp = ok ? FsHelpers::naturalCompare(bs.nameB.get(), bs.nameA.get()) : 0;
-        if (!ok || cmp < 0 || (cmp == 0 && segment[j - 1] <= candidate)) break;
-        segment[j] = segment[j - 1];
-        j--;
+      if (!ok) return false;
+      // Already ordered ties are common on cards populated in sequence.
+      const auto precedesCandidate = [&](uint32_t offset) {
+        ok = readNameAt(bs.idxTmp, offset, bs.nameB.get(), NAME_BUF_SIZE);
+        if (!ok) return false;
+        const int cmp = FsHelpers::naturalCompare(bs.nameB.get(), bs.nameA.get());
+        return cmp < 0 || (cmp == 0 && offset < candidate);
+      };
+      if (precedesCandidate(segment[i - 1])) continue;
+      size_t low = 0;
+      size_t high = i - 1;
+      while (ok && low < high) {
+        const size_t mid = low + (high - low) / 2;
+        if (precedesCandidate(segment[mid])) {
+          low = mid + 1;
+        } else {
+          high = mid;
+        }
       }
-      segment[j] = candidate;
+      std::move_backward(segment + low, segment + i, segment + i + 1);
+      segment[low] = candidate;
     }
     return ok;
   };
@@ -563,8 +599,7 @@ bool FileIndex::writeOffsets(BuildState& bs, uint32_t recordCount) {
         if (ok) ok = out.write(segment, len * sizeof(uint32_t)) == len * sizeof(uint32_t);
         maybeYield(bs.yieldCounter);
       }
-      out.flush();
-      out.close();
+      ok = finishOutput(out) && ok;
       if (!ok) return false;
     }
 
@@ -592,11 +627,11 @@ bool FileIndex::writeOffsets(BuildState& bs, uint32_t recordCount) {
 
         while (ok && (ia < lenA || ib < lenB)) {
           if (!haveA && ia < lenA) {
-            ok = readTieOffsetAt(in, base + ia, offsetA);
+            ok = readTieOffsetAt(in, base + ia, offsetA) && readNameAt(bs.idxTmp, offsetA, bs.nameA.get(), NAME_BUF_SIZE);
             haveA = ok;
           }
           if (ok && !haveB && ib < lenB) {
-            ok = readTieOffsetAt(in, base + lenA + ib, offsetB);
+            ok = readTieOffsetAt(in, base + lenA + ib, offsetB) && readNameAt(bs.idxTmp, offsetB, bs.nameB.get(), NAME_BUF_SIZE);
             haveB = ok;
           }
           if (!ok) break;
@@ -605,8 +640,8 @@ bool FileIndex::writeOffsets(BuildState& bs, uint32_t recordCount) {
           if (haveA && !haveB) {
             takeA = true;
           } else if (haveA && haveB) {
-            takeA = offsetComesBefore(offsetA, offsetB);
-            if (!ok) break;
+            const int cmp = FsHelpers::naturalCompare(bs.nameA.get(), bs.nameB.get());
+            takeA = cmp < 0 || (cmp == 0 && offsetA <= offsetB);
           }
           const uint32_t chosen = takeA ? offsetA : offsetB;
           ok = out.write(&chosen, sizeof(chosen)) == sizeof(chosen);
@@ -622,8 +657,7 @@ bool FileIndex::writeOffsets(BuildState& bs, uint32_t recordCount) {
       }
 
       in.close();
-      out.flush();
-      out.close();
+      ok = finishOutput(out) && ok;
       std::swap(inPath, outPath);
     }
 
@@ -643,6 +677,15 @@ bool FileIndex::writeOffsets(BuildState& bs, uint32_t recordCount) {
     return ok;
   };
 
+  size_t pending = 0;
+  const auto flushOffsets = [&]() {
+    if (!pending) return true;
+    const size_t bytes = pending * sizeof(*segment);
+    if (!bs.idxTmp.seek(appendPos) || bs.idxTmp.write(segment, bytes) != bytes) return false;
+    appendPos += bytes;
+    pending = 0;
+    return true;
+  };
   for (uint32_t groupStart = 0; ok && groupStart < recordCount;) {
     RunRecord first{};
     ok = readRunRecordAt(groupStart, first);
@@ -657,10 +700,21 @@ bool FileIndex::writeOffsets(BuildState& bs, uint32_t recordCount) {
       maybeYield(bs.yieldCounter);
     }
 
-    ok = groupLen <= MAX_TIE_SEGMENT ? appendSmallTieGroup(groupStart, groupLen)
-                                     : appendLargeTieGroup(groupStart, groupLen);
+    if (!ok) break;
+    if (groupLen == 1) {
+      // A unique prefix is already in final order. Reuse the tie scratch
+      // to append consecutive offsets together without a seek/flush per name.
+      segment[pending++] = first.blobOffset;
+      if (pending == MAX_TIE_SEGMENT) ok = flushOffsets();
+    } else if (flushOffsets()) {
+      ok = groupLen <= MAX_TIE_SEGMENT ? appendSmallTieGroup(groupStart, groupLen)
+                                       : appendLargeTieGroup(groupStart, groupLen);
+    } else {
+      ok = false;
+    }
     groupStart += groupLen;
   }
+  ok = ok && flushOffsets();
 
   if (run) run.close();
   Storage.remove(bs.tiePathA);

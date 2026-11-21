@@ -379,20 +379,35 @@ bool LibraryIndexFile::buildFolderCheckpoints(uint32_t* offsets, uint16_t& strid
 }
 
 bool LibraryIndexFile::readPath(const ClixRecord& record, std::string& out, const uint32_t* offsets,
-                                const uint16_t stride) {
+                                uint16_t stride) {
   out.clear();
   if (!opened || record.folderId >= head.folderCount) return false;
 
-  // Folder records are variable length. A scan can supply sparse offsets to
-  // bound each walk; ordinary single-book reads still start at folder zero.
-  const uint16_t firstFolder = offsets && stride ? (record.folderId / stride) * stride : 0;
-  uint32_t offset = offsets && stride ? offsets[record.folderId / stride] : head.folderStart;
+  // A filter supplies its own complete checkpoint table. For ordinary browsing
+  // retain only boundaries reached by earlier lookups in this open index.
+  auto* cache = offsets ? nullptr : displayRowCache.get();
+  uint16_t firstFolder = 0;
+  uint32_t offset = head.folderStart;
+  if (cache) {
+    stride = (head.folderCount + DisplayRowCache::FOLDER_BLOCKS - 1u) / DisplayRowCache::FOLDER_BLOCKS;
+    if (cache->knownFolderBlocks) {
+      const auto block = std::min<unsigned>(record.folderId / stride, cache->knownFolderBlocks - 1u);
+      firstFolder = block * stride;
+      offset = cache->folderStarts[block];
+    }
+  } else if (offsets && stride) {
+    firstFolder = (record.folderId / stride) * stride;
+    offset = offsets[record.folderId / stride];
+  }
   const uint32_t folderEnd = head.folderStart + head.folderLen;
   for (uint32_t i = firstFolder; i <= record.folderId; i++) {
     if (offset >= folderEnd) return false;
     uint8_t pathLen = 0;
     if (!readAt(offset, &pathLen, sizeof(pathLen)) || pathLen == 0) return false;
     if (pathLen > folderEnd - offset - 1u) return false;
+    if (cache && i == static_cast<uint32_t>(cache->knownFolderBlocks) * stride) {
+      cache->folderStarts[cache->knownFolderBlocks++] = offset;
+    }
     if (i == record.folderId) {
       std::string dir(pathLen, '\0');
       if (!readAt(offset + 1, dir.data(), pathLen)) return false;

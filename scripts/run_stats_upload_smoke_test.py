@@ -128,6 +128,9 @@ def local_tests(program):
         assert requests[0][0] == "/api/v1/stats/global"
         assert requests[2][0] == "/api/v1/stats/books"
         assert len(base64.b64decode(requests[0][1]["history_b64"])) == 92
+        assert requests[0][1]["completed"] == requests[0][1]["completed_books"] == requests[0][1]["completed_articles"] == 0
+        assert requests[0][1]["has_articles"] is False
+        assert requests[2][1]["items"][0]["is_article"] is False
         assert requests[2][1]["items"][0]["document"] == DOCUMENT
         print("PASS: production payloads, headers, global/book uploads, identical retries")
         for mode, error in [("ok", None), ("partial-batch", 4), ("extra-batch", 4), ("missing-batch", 4)]:

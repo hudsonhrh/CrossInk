@@ -18,10 +18,22 @@ bool flush();
 bool counterId(StatsCounterId& id);
 // Streams cumulative daily totals; acknowledges only successful callbacks. No file stays open during upload.
 bool uploadPending(bool (*upload)(void*, uint32_t day, uint32_t seconds), void* context);
-// Call after successful sync. Keeps current/previous/future months and any unsynced or uncertain data.
-bool pruneSyncedMonths(const ReadingStatsDate& today);
+// Call after successful sync. Keep the current month, this many prior months, and all future or uncertain data.
+bool pruneSyncedMonths(const ReadingStatsDate& today, uint8_t priorMonthsToKeep = 1);
 // Seconds for one day, including accepted seconds not yet checkpointed to SD.
 bool secondsFor(uint32_t day, uint32_t& seconds);
+
+constexpr size_t MAX_SIX_MONTH_DAYS = 184;
+// Number of dates after the same day six months ago (clamped to the shorter month), through today.
+size_t sixMonthDayCount(const ReadingStatsDate& today);
+// Load device-local seconds oldest first, including pending time. Use the output only on success.
+bool loadWindow(const ReadingStatsDate& today, uint32_t* seconds, size_t count);
+struct WindowSummary {
+  uint32_t totalSeconds = 0;
+  uint16_t activeDays = 0;
+  uint32_t peakSeconds = 0;
+};
+WindowSummary summarizeWindow(const uint32_t* seconds, size_t count);
 
 // Today plus a 7-calendar-day average. Days without reading count as zero.
 struct Summary {
@@ -30,7 +42,8 @@ struct Summary {
   uint32_t todaySeconds = 0;
   uint32_t sevenDayAverageSeconds = 0;
 };
-Summary summarize(uint32_t today);
+// A successfully loaded window ends on today. Read only any uncovered days from storage.
+Summary summarize(uint32_t today, const uint32_t* windowSeconds = nullptr, size_t windowDays = 0);
 
 // Clock capture is paired with the existing page timer, including its pauses.
 // At most nine one-second dates can precede the existing 10-second session floor.

@@ -236,17 +236,18 @@ TEST(LibraryIndexFile, RejectsFolderRecordBeyondFolderBlob) {
   EXPECT_FALSE(index.readPath(record, path));
 }
 
-TEST(LibraryIndexFile, FolderCheckpointsResolvePathsAcrossBuckets) {
+namespace {
+void setFolderIndex(const uint16_t folderCount, const std::string& prefix, const uint16_t corruptFolder = UINT16_MAX) {
   library::ClixHeader header{};
   std::memcpy(header.magic, library::CLIX_MAGIC, sizeof(header.magic));
   header.formatVersion = library::CLIX_FORMAT_VERSION;
   header.foldVersion = library::CLIX_FOLD_VERSION;
   header.bookCount = 1;
-  header.folderCount = 130;
+  header.folderCount = folderCount;
   std::vector<uint8_t> folders;
   for (unsigned i = 0; i < header.folderCount; ++i) {
-    const std::string dir = "/b" + std::to_string(i);
-    folders.push_back(static_cast<uint8_t>(dir.size()));
+    const std::string dir = prefix + std::to_string(i);
+    folders.push_back(i == corruptFolder ? 0 : static_cast<uint8_t>(dir.size()));
     folders.insert(folders.end(), dir.begin(), dir.end());
   }
   const auto blob = makeBlob(1, {'x'});
@@ -255,8 +256,15 @@ TEST(LibraryIndexFile, FolderCheckpointsResolvePathsAcrossBuckets) {
   std::memcpy(bytes.data(), &header, sizeof(header));
   std::memcpy(bytes.data() + header.folderStart, folders.data(), folders.size());
   std::memcpy(bytes.data() + header.nameStart, blob.data(), blob.size());
+  library::ClixRecord record{};
+  record.nameLen = 1;
+  std::memcpy(bytes.data() + header.recordStart, &record, sizeof(record));
   Storage.setFile("/library.clx", std::move(bytes));
+}
+}  // namespace
 
+TEST(LibraryIndexFile, FolderCheckpointsResolvePathsAcrossBuckets) {
+  setFolderIndex(130, "/b");
   library::LibraryIndexFile index;
   ASSERT_TRUE(index.open("/library.clx"));
   uint32_t offsets[library::LibraryIndexFile::FOLDER_CHECKPOINT_COUNT]{};
@@ -271,6 +279,46 @@ TEST(LibraryIndexFile, FolderCheckpointsResolvePathsAcrossBuckets) {
     ASSERT_TRUE(index.readPath(record, path, offsets, stride));
     EXPECT_EQ(path, "/b" + std::to_string(folderId) + "/x");
   }
+}
+
+TEST(LibraryIndexFile, BrowserLearnsFolderOffsetsLazilyAndDropsThemOnReopen) {
+  library::LibraryIndexFile index(true);
+  library::ClixRecord record{};
+  std::string path;
+  const auto open = [&] {
+    ASSERT_TRUE(index.open("/library.clx"));
+    ASSERT_TRUE(index.readRecord(0, record));
+  };
+  const auto resolve = [&](const uint16_t id, const std::string& prefix) {
+    record.folderId = id;
+    ASSERT_TRUE(index.readPath(record, path));
+    EXPECT_EQ(path, prefix + std::to_string(id) + "/x");
+  };
+
+  setFolderIndex(250, "/folder");
+  open();
+  HalFile::reads = 0;
+  resolve(0, "/folder");
+  EXPECT_LE(HalFile::reads, 3u);  // Opening an early book never scans ahead.
+  resolve(249, "/folder");
+  HalFile::reads = 0;
+  for (const uint16_t id : {248, 123, 1, 249, 21}) resolve(id, "/folder");
+  EXPECT_LT(HalFile::reads, 75u);  // Five lookups resume close to their target.
+
+  index.close();
+  setFolderIndex(250, "/a-longer-name", 220);
+  open();
+  resolve(210, "/a-longer-name");
+  record.folderId = 248;
+  EXPECT_FALSE(index.readPath(record, path));
+  EXPECT_TRUE(path.empty());
+  resolve(210, "/a-longer-name");  // A failed walk never seeds offsets beyond the damage.
+
+  index.close();
+  setFolderIndex(25, "/new");
+  failNextObjectAllocation = true;
+  open();
+  resolve(24, "/new");  // The direct walk still works when the optional cache is unavailable.
 }
 
 TEST(LibraryIndexFile, DisplayTextAcceptsMissingMetadataAndRejectsMalformedFields) {

@@ -38,13 +38,18 @@ class GfxRenderer {
     absolute = !rejectBase;
     return absolute;
   }
-  void displayBuffer(int) { events.push_back("display"); }
+  mutable int baseMode = -1;
+  void displayBuffer(int mode) const {
+    baseMode = mode;
+    events.push_back("display");
+  }
+  void preconditionGrayscale() const { events.push_back("precondition"); }
   std::vector<uint8_t> savedBw;
   bool supported = true, inverted = false, active = false;
   int origin = 0, rows = 0, placeholders = 0;
   uint8_t* target = nullptr;
   std::vector<uint8_t> bw, lsb, msb;
-  std::vector<std::string> events;
+  mutable std::vector<std::string> events;
   FontCacheManager fonts;
   GfxRenderer(int w = 792, int h = 481)
       : width(w), height(h), stride((w + 7) / 8), bw(stride * h, 0xA5), lsb(stride * h), msb(stride * h) {}
@@ -84,7 +89,10 @@ class GfxRenderer {
   }
   void clearScreen(uint8_t c = 0xff) { memset(getWriteTarget(), c, size_t(stride) * getWriteRows()); }
   bool combinesGrayscaleBase() const { return combinedBase && !inverted; }
-  void displayGrayscaleBase(int) { events.push_back("combined-base"); }
+  void displayGrayscaleBase(int mode) const {
+    baseMode = mode;
+    events.push_back("combined-base");
+  }
   bool supportsDeferredGrayscaleBase() const { return deferredSupported && !inverted; }
   void displayGrayscaleBaseAsync(int) { events.push_back("base"); }
   void copyGrayscalePlanes(const uint8_t* low, const uint8_t* high) {

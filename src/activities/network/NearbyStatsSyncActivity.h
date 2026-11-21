@@ -38,6 +38,7 @@ class NearbyStatsSyncActivity final : public Activity {
     std::array<uint8_t, GlobalReadingStats::CURRENT_FILE_SIZE> stats = {};
     std::array<char, 21> deviceName = {};
     uint8_t statsSize = 0;
+    uint8_t peerStatsVersion = 0;
   };
   static constexpr size_t MAX_SYNC_EVENTS = 8;
 
@@ -59,7 +60,7 @@ class NearbyStatsSyncActivity final : public Activity {
   std::array<uint8_t, 6> peerSourceMac_ = {};
   std::array<uint8_t, 6> peerDeviceMac_ = {};
   std::array<uint8_t, GlobalReadingStats::CURRENT_FILE_SIZE> localStats_ = {};
-  uint8_t localStatsSize_ = 0;
+  uint8_t peerStatsVersion_ = 0;
 
   uint32_t syncStartedMs_ = 0;
   uint32_t lastHelloMs_ = 0;

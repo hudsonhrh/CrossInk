@@ -15,7 +15,11 @@ struct HostFileData {
   std::vector<uint8_t> bytes;
   bool directory = false;
 };
+struct SimulatedPowerCut {};
 struct HostFaults {
+  // The test reboots from the exact bytes on disk when one of these boundaries is reached.
+  std::string powerCutOnWrite;
+  std::string powerCutOnRemove;
   int bytesUntilFailure = -1;
   bool failSync = false;
   bool failClose = false;
@@ -23,6 +27,8 @@ struct HostFaults {
   bool failOpenWrite = false;
   std::string failRenameFrom;
   std::string failReadPath;
+  std::string failNextReadPath;
+  std::string failNextWritePath;
   std::string readErrorPath;
   size_t readErrorAfter = 0;
   bool shortRead = false;
@@ -48,6 +54,14 @@ class HalFile : public Print {
   size_t write(uint8_t value) override { return write(&value, 1); }
   size_t write(const uint8_t* input, size_t length) override {
     if (!data_) return 0;
+    if (name_ == faults.powerCutOnWrite) {
+      faults.powerCutOnWrite.clear();
+      throw SimulatedPowerCut{};
+    }
+    if (!faults.failNextWritePath.empty() && name_ == faults.failNextWritePath) {
+      faults.failNextWritePath.clear();
+      return 0;
+    }
     if (faults.bytesUntilFailure >= 0) {
       length = std::min(length, static_cast<size_t>(faults.bytesUntilFailure));
       faults.bytesUntilFailure -= length;
@@ -129,6 +143,10 @@ class HalStorage {
   }
   bool ensureDirectoryExists(const char* path) { return exists(path) || mkdir(path); }
   bool remove(const char* path) {
+    if (faults.powerCutOnRemove == path) {
+      faults.powerCutOnRemove.clear();
+      throw SimulatedPowerCut{};
+    }
     if (failRemovePath_ == path) {
       failRemovePath_.clear();
       return false;
@@ -171,6 +189,10 @@ class HalStorage {
   bool openFileForRead(const char*, const std::string& path, HalFile& file) {
     ++faults.readOpens;
     if (faults.failReadPath == path) return false;
+    if (faults.failNextReadPath == path) {
+      faults.failNextReadPath.clear();
+      return false;
+    }
     const auto it = files.find(path);
     if (it == files.end()) return false;
     file = HalFile(it->second, path);

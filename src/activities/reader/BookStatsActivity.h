@@ -5,12 +5,13 @@
 #include <string>
 
 #include "../Activity.h"
+#include "AppCapabilities.h"
 #include "BookReadingStats.h"
 #include "BookStatsView.h"
 #include "GlobalReadingStats.h"
 
 class BookStatsActivity final : public Activity {
-  enum class Page : uint8_t { PerBook, ThisDevice, AllDevices, EditDates };
+  enum class Page : uint8_t { PerBook, ThisDevice, AllDevices, History, EditDates };
 
   std::string bookTitle;
   std::string bookCachePath;
@@ -20,6 +21,13 @@ class BookStatsActivity final : public Activity {
   GlobalReadingStats globalStats;
   GlobalReadingStats allDevicesStats;
   DailyReadingStats::Summary dailySummary;
+#if CROSSINK_APP_READING_HEATMAP
+  // Owned by this activity so six months of daily counters never live on the render task stack.
+  uint32_t historySeconds[DailyReadingStats::MAX_SIX_MONTH_DAYS]{};
+  ReadingStatsDate historyToday;
+  size_t historyDays = 0;
+  void loadHistory();
+#endif
   bool showAllDevicesStats = false;
   bool returnToHomeOnExit = false;
   float progressPercent = -1.0f;
@@ -27,6 +35,9 @@ class BookStatsActivity final : public Activity {
   uint32_t estimatedTimeLeftSeconds = 0;
   GfxRenderer::Orientation previousOrientation = GfxRenderer::Orientation::Portrait;
   Page page = Page::PerBook;
+#if CROSSINK_APP_READING_HEATMAP
+  bool cleanHistoryOnOpen = false;
+#endif
   int selectedEditField = 0;
   bool didChangeStats = false;
   BookReadingStats dateEditStatsSnapshot;
@@ -38,7 +49,8 @@ class BookStatsActivity final : public Activity {
   bool ignoreInitialPowerRelease = false;
 
   bool hasEditableBook() const { return !bookCachePath.empty() && halClock.isAvailable(); }
-  bool usesNoRtcSingleScreenLayout() const { return !halClock.isAvailable(); }
+  // Daily counters can use trusted system time when the X4 Pro RTC is unavailable.
+  bool usesNoRtcSingleScreenLayout() const { return !SETTINGS.shouldShowReadingHeatmap() && !halClock.isAvailable(); }
   void refreshAllDevicesStats();
   void loadDailySummary();
   void saveStats();
@@ -60,6 +72,15 @@ class BookStatsActivity final : public Activity {
   void startSyncReadingStats();
 
  public:
+#if CROSSINK_APP_READING_HEATMAP
+  void openHistoryPage() {
+    if (SETTINGS.shouldShowReadingHeatmap()) {
+      page = Page::History;
+      cleanHistoryOnOpen = true;
+    }
+  }
+  void onFrontlightPanelClosed() override;
+#endif
   // The book these stats belong to, so date edits are queued for the next sync.
   void setSyncBookPath(std::string path) { syncBookPath = std::move(path); }
   BookStatsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& title,

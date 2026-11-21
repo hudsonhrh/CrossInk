@@ -12,6 +12,7 @@ class HalFile {
 
  public:
   inline static uint64_t failedSeekOffset = UINT64_MAX;
+  inline static uint64_t failedReadOffset = UINT64_MAX;
   inline static uint64_t shortReadOffset = UINT64_MAX;
   uint64_t fileSize64() const { return data ? data->size() : 0; }
   bool seek(uint64_t offset) { return seek64(offset); }
@@ -20,7 +21,8 @@ class HalFile {
     pos = static_cast<size_t>(offset);
     return true;
   }
-  size_t read(void* dst, size_t len) {
+  int read(void* dst, size_t len) {
+    if (pos == failedReadOffset) return -1;
     if (!data) return 0;
     if (pos == shortReadOffset && len > 1) len = 1;
     const size_t remaining = data->size() - pos;

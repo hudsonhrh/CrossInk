@@ -52,6 +52,8 @@ class EpubReaderDrawerActivity final : public Activity {
       ReaderDrawerState initialState = initialReaderDrawerState(CROSSINK_APP_CAP_TOUCH),
       std::unique_ptr<EpubReaderPreviewModel> ownedPreviewModel = nullptr);
 
+  void setArticle(bool article) { isArticle = article; }
+
   // Button menu only: shown under the book title. Set before the activity starts.
   void setChapterTitle(std::string title) { chapterTitle = std::move(title); }
 #if CROSSINK_SCALABLE_FONTS
@@ -159,6 +161,7 @@ class EpubReaderDrawerActivity final : public Activity {
   bool bookStatsEnabled = true;
   bool isCurrentPageBookmarked = false;
   bool isBookCompleted = false;
+  bool isArticle = false;
   bool showReadingPaceReset = false;
   bool settingsChanged = false;
   bool didChangeSettings = false;

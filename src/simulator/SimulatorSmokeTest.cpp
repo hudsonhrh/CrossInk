@@ -1542,19 +1542,23 @@ struct StatusBarFeatureSmokeTest {
       if ((mask & 2) && reader.cachedFooterReservedHeight != SETTINGS.screenMarginVertical) return false;
       capture("txt-hidden-" + std::to_string(mask));
     }
-    if (!reader.saveProgress(reader.currentPage)) return false;
+    if (!reader.flushQueuedProgress()) return false;
     auto reopened = std::make_unique<Txt>(path, "/.crosspoint");
     if (!reopened->load()) return false;
     TxtReaderActivity second(renderer, mappedInputManager, std::move(reopened), 1);
     second.render(std::move(lock));
-    if (second.currentPage != reader.currentPage || second.pageOffsets != reader.pageOffsets) return false;
+    if (second.currentPage != reader.currentPage || second.pageOffsets.size() != reader.pageOffsets.size())
+      return false;
+    for (size_t page = 0; page < reader.pageOffsets.size(); ++page) {
+      if (second.pageOffsets[page] != reader.pageOffsets[page]) return false;
+    }
 
     // A page turn starts a new anchor; changing bars while the book is closed
     // restores the saved content offset rather than a now-obsolete page number.
     second.currentPage = std::min(second.currentPage + 2, second.totalPages - 1);
     second.render(std::move(lock));
     const auto turnedOffset = second.pageOffsets[second.currentPage];
-    if (!second.saveProgress(second.currentPage)) return false;
+    if (!second.flushQueuedProgress()) return false;
     SETTINGS.topReaderStatusBar.hidden = true;
     SETTINGS.bottomReaderStatusBar.hidden = true;
     auto closedBook = std::make_unique<Txt>(path, "/.crosspoint");
@@ -1588,19 +1592,44 @@ struct StatusBarFeatureSmokeTest {
     zeroProgress.close();
     third.loadProgress();
     if (third.currentPage != 2) return false;
-    // Exiting during a font rebuild must not publish a made-up byte offset.
-    const int pendingPage = third.currentPage;
+    // A pending turn has not reached the debounce threshold. Reflow before
+    // another save and confirm the last displayed byte stays on screen.
+    third.render(std::move(lock));  // Apply the preceding bar edit before turning.
+    third.currentPage = std::min(third.currentPage + 5, third.totalPages - 1);
+    third.render(std::move(lock));
+    const auto pendingPage = third.currentPage;
+    const auto pendingOffset = third.pageOffsets[pendingPage];
+    third.rebuildTextLayout();
     third.pageOffsets.clear();
-    if (!third.saveProgress(pendingPage)) return false;
+    if (!third.flushQueuedProgress()) return false;
     auto progress = Storage.open(progressPath.c_str(), O_RDONLY);
-    uint8_t pendingRecord[6]{};
-    if (!progress || progress.size() != sizeof(pendingRecord) ||
-        progress.read(pendingRecord, sizeof(pendingRecord)) != sizeof(pendingRecord))
+    uint8_t record[6]{};
+    if (!progress || progress.size() != sizeof(record) || progress.read(record, sizeof(record)) != sizeof(record))
       return false;
     progress.close();
-    if (pendingRecord[0] != pendingPage || pendingRecord[1] != 0 || pendingRecord[2] != 255 ||
-        pendingRecord[3] != 255 || pendingRecord[4] != 255 || pendingRecord[5] != 255)
+    const uint32_t storedOffset =
+        record[2] | (uint32_t{record[3]} << 8) | (uint32_t{record[4]} << 16) | (uint32_t{record[5]} << 24);
+    if ((record[0] | (record[1] << 8)) != pendingPage || storedOffset != pendingOffset) return false;
+
+    // The in-memory anchor wins over older persisted progress even after a
+    // failed reindex. Restoring the book and rendering again must recover.
+    third.render(std::move(lock));
+    if (!contains(third, pendingOffset)) {
+      LOG_ERR("SMOKE", "TXT reflow lost byte %u on page %d", pendingOffset, third.currentPage);
       return false;
+    }
+    third.currentPage = std::min(pendingPage + 2, third.totalPages - 1);
+    third.render(std::move(lock));
+    const auto newerOffset = third.pageOffsets[third.currentPage];
+    third.rebuildTextLayout();
+    Storage.remove((third.txt->getCachePath() + "/index.bin").c_str());
+    const std::string moved = std::string(path) + ".paused";
+    if (!Storage.rename(path, moved.c_str())) return false;
+    third.render(std::move(lock));
+    const bool failed = !third.initialized;
+    if (!Storage.rename(moved.c_str(), path) || !failed) return false;
+    third.render(std::move(lock));
+    if (!third.initialized || !contains(third, newerOffset)) return false;
     return true;
   }
   static bool xtc(RenderLock& lock, const Capture& capture) {
@@ -4808,11 +4837,15 @@ class SimulatorSmokeTest {
       }
       const uint8_t originalTracking = SETTINGS.trackReadingStats;
       const uint8_t originalShortcut = SETTINGS.shortPwrBtn;
+      const uint8_t originalLabel = SETTINGS.readingStatsCategoryLabel;
       SETTINGS.trackReadingStats = 0;
       SETTINGS.shortPwrBtn = CrossPointSettings::READING_STATS;
+      SETTINGS.readingStatsCategoryLabel = CrossPointSettings::STATS_LABEL_ARTICLES;
       JsonDocument disabled;
       SETTINGS.toJson(disabled);
+      SETTINGS.readingStatsCategoryLabel = CrossPointSettings::STATS_LABEL_SHORT_READS;
       SETTINGS.fromJson(disabled.as<JsonVariantConst>());
+      if (SETTINGS.usesShortReadsLabel()) fail("Saved Articles label did not survive a settings round trip");
       if (SETTINGS.shortPwrBtn != CrossPointSettings::READING_STATS)
         fail("Disabled stats tracking discarded a persisted shortcut");
       const auto hidden = getSettingsList();
@@ -4821,6 +4854,19 @@ class SimulatorSmokeTest {
       if (power == hidden.end() || std::find(power->enumRawValues.begin(), power->enumRawValues.end(),
                                              CrossPointSettings::READING_STATS) != power->enumRawValues.end())
         fail("Stats shortcut still offered while tracking is disabled");
+      SETTINGS.trackReadingStats = 1;
+      const auto statsMenu = buildSystemReadingStatsSettingsList(second);
+      if (std::none_of(statsMenu.begin(), statsMenu.end(),
+                       [](const SettingInfo& setting) { return settingKeyIs(setting, "readingStatsCategoryLabel"); }))
+        fail("Reading Stats menu is missing its category label");
+      disabled["readingStatsCategoryLabel"] = 99;
+      SETTINGS.fromJson(disabled.as<JsonVariantConst>());
+      if (!SETTINGS.usesShortReadsLabel()) fail("Invalid category label did not fall back to Short Reads");
+      disabled.remove("readingStatsCategoryLabel");
+      SETTINGS.readingStatsCategoryLabel = CrossPointSettings::STATS_LABEL_ARTICLES;
+      SETTINGS.fromJson(disabled.as<JsonVariantConst>());
+      if (!SETTINGS.usesShortReadsLabel()) fail("Older settings did not default to Short Reads");
+      SETTINGS.readingStatsCategoryLabel = originalLabel;
       SETTINGS.trackReadingStats = originalTracking;
       SETTINGS.shortPwrBtn = originalShortcut;
       LOG_INF("SMOKE", "Settings catalog ownership and streamed persistence checks passed (%zu entries)", index);

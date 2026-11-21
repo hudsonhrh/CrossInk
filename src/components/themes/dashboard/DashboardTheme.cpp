@@ -22,6 +22,9 @@
 #include "activities/reader/BookReadingStats.h"
 #include "activities/reader/BookStatsTracking.h"
 #include "activities/reader/GlobalReadingStats.h"
+#if CROSSINK_APP_READING_HEATMAP
+#include "activities/reader/DailyReadingStats.h"
+#endif
 #include "activities/reader/ReadingStatsUtils.h"
 #include "components/TouchRegistry.h"
 #include "components/UITheme.h"
@@ -53,6 +56,9 @@ constexpr int kTitleTopGap = 28;
 constexpr int kTitleChapterGap = 8;
 constexpr int kBookTitleMaxLines = 2;
 constexpr int kBookChapterMaxLines = 2;
+#if CROSSINK_APP_READING_HEATMAP
+constexpr int kHistoryTopPad = 12;
+#endif
 constexpr int kFooterIconSize = 24;
 constexpr int kFooterIconTextGap = 18;
 constexpr int kFooterBottomGap = 57;
@@ -69,6 +75,23 @@ struct DashboardLayout {
   Rect footer;
 };
 
+Rect footerForContent(const GfxRenderer& renderer, const Rect& content) {
+  const int bottom = content.y + content.height;
+#if CROSSINK_APP_READING_HEATMAP
+  // The saved layout determines thumbnail dimensions even while tracking is paused.
+  if (SETTINGS.showReadingHeatmap) {
+    const int footerH = kHistoryTopPad + renderer.getLineHeight(UI_10_FONT_ID) + renderer.getLineHeight(UI_12_FONT_ID) +
+                        renderer.getLineHeight(SMALL_FONT_ID);
+    return Rect{content.x, std::max(content.y, bottom - footerH - 8), content.width, footerH};
+  }
+#endif
+  const int footerH = halClock.isAvailable() ? std::max(kFooterIconSize, renderer.getLineHeight(UI_10_FONT_ID))
+                                             : renderer.getLineHeight(UI_12_FONT_ID) + kStatsValueLabelGap +
+                                                   renderer.getLineHeight(UI_10_FONT_ID);
+  const int footerCenter = std::max(content.y + footerH / 2, bottom - std::max(kFooterBottomGap, (footerH + 1) / 2));
+  return Rect{content.x, footerCenter - footerH / 2, content.width, footerH};
+}
+
 DashboardLayout layoutForContent(const GfxRenderer& renderer, Rect content) {
   const auto edges = renderer.getViewableInsets().rotated(static_cast<unsigned>(renderer.getOrientation())).edges;
   const int inset = isWideScreen(renderer) ? kContentInsetX3 : kContentInsetX4;
@@ -82,14 +105,7 @@ DashboardLayout layoutForContent(const GfxRenderer& renderer, Rect content) {
   content.y += topInset;
   content.height -= topInset;
 
-  const int footerH = halClock.isAvailable() ? std::max(kFooterIconSize, renderer.getLineHeight(UI_10_FONT_ID))
-                                             : renderer.getLineHeight(UI_12_FONT_ID) + kStatsValueLabelGap +
-                                                   renderer.getLineHeight(UI_10_FONT_ID);
-  const int bottom = content.y + content.height;
-  const int footerCenter = std::max(content.y + footerH / 2, bottom - std::max(kFooterBottomGap, (footerH + 1) / 2));
-  const Rect footer{content.x, footerCenter - footerH / 2, content.width, footerH};
-  // Tracking can change while Home retains its cover buffer. Keep the artwork
-  // geometry stable; disabling stats only hides the footer, not its reserved space.
+  const Rect footer = footerForContent(renderer, content);
   const int textBottom = footer.y - kTitleChapterGap;
   const int textH =
       (kBookTitleMaxLines + kBookChapterMaxLines) * renderer.getLineHeight(renderer.filenameFontId(UI_12_FONT_ID)) +
@@ -409,6 +425,71 @@ bool showBookStatsForPath(const std::string& path) {
   return false;
 }
 
+#if CROSSINK_APP_READING_HEATMAP
+void drawHistoryFooter(const GfxRenderer& renderer, const Rect& footer, const DashboardHistory& history,
+                       const bool black, const bool interactive = false) {
+  constexpr int gridGap = 3;
+  constexpr int columns = ReadingHeatmap::MonthColumns;
+  constexpr int rows = ReadingHeatmap::MonthRows;
+  char time[40];
+  ReadingHeatmap::formatDuration(history.totalSeconds, time, sizeof(time));
+  char streak[48];
+  if (history.streak > 0) {
+    snprintf(streak, sizeof(streak), tr(STR_STATS_DAY_STREAK_FORMAT), static_cast<unsigned>(history.streak));
+  } else {
+    snprintf(streak, sizeof(streak), "%s", tr(STR_STATS_NO_STREAK));
+  }
+
+  constexpr int columnGap = 12;
+  constexpr int chevronWidth = 15;
+  const char* heading = tr(STR_STATS_LAST_30_DAYS);
+  int mapWidth = footer.width / 2;
+  if (interactive) {
+    const int labelW = std::max({renderer.getTextWidth(UI_10_FONT_ID, heading) + chevronWidth,
+                                 renderer.getTextWidth(UI_12_FONT_ID, time, EpdFontFamily::BOLD),
+                                 renderer.getTextWidth(SMALL_FONT_ID, streak)});
+    mapWidth = std::clamp(footer.width - labelW - columnGap, mapWidth, footer.width * 2 / 3);
+  }
+  const int cellWidth = (mapWidth - (columns - 1) * gridGap) / columns;
+  const int cellHeight = (footer.height - kHistoryTopPad - (rows - 1) * gridGap) / rows;
+  const int size = std::max(1, std::min(cellWidth, cellHeight));
+  const int gridW = size * columns + gridGap * (columns - 1);
+  const int gridH = size * rows + gridGap * (rows - 1);
+  const int gridX = footer.x + footer.width - gridW;
+  const int maxW = std::max(1, gridX - footer.x - columnGap);
+  const int gridAreaY = footer.y + kHistoryTopPad;
+  const int gridAreaH = footer.height - kHistoryTopPad;
+  const int textH = renderer.getLineHeight(UI_10_FONT_ID) + renderer.getLineHeight(UI_12_FONT_ID) +
+                    renderer.getLineHeight(SMALL_FONT_ID);
+  const int contentY = gridAreaY + std::max(0, (gridAreaH - textH) / 2);
+  const int timeY = contentY + renderer.getLineHeight(UI_10_FONT_ID);
+  renderer.drawLine(footer.x, footer.y, footer.x + footer.width - 1, footer.y, black);
+
+  const auto title = renderer.truncatedText(UI_10_FONT_ID, heading, maxW - (interactive ? chevronWidth : 0));
+  renderer.drawText(UI_10_FONT_ID, footer.x, contentY, title.c_str(), black);
+  if (interactive) {
+    const int x = footer.x + renderer.getTextWidth(UI_10_FONT_ID, title.c_str()) + 8;
+    const int y = (contentY + timeY) / 2;
+    renderer.drawLine(x, y - 4, x + 4, y, 2, black);
+    renderer.drawLine(x + 4, y, x, y + 4, 2, black);
+  }
+  if (!history.available) {
+    renderer.drawText(SMALL_FONT_ID, footer.x, timeY,
+                      renderer.truncatedText(SMALL_FONT_ID, tr(STR_STATS_HISTORY_UNAVAILABLE), footer.width).c_str(),
+                      black);
+    return;
+  }
+  const auto scale = ReadingHeatmap::scaleForMonth(history.seconds.data());
+  ReadingHeatmap::drawMonth(renderer, gridX, gridAreaY + (gridAreaH - gridH) / 2, size, gridGap, history.seconds.data(),
+                            scale, black);
+
+  renderer.drawText(UI_12_FONT_ID, footer.x, timeY,
+                    renderer.truncatedText(UI_12_FONT_ID, time, maxW, EpdFontFamily::BOLD).c_str(), black,
+                    EpdFontFamily::BOLD);
+  renderer.drawText(SMALL_FONT_ID, footer.x, timeY + renderer.getLineHeight(UI_12_FONT_ID),
+                    renderer.truncatedText(SMALL_FONT_ID, streak, maxW).c_str(), black);
+}
+#endif
 bool dominantReaderTypeBucket(const GlobalReadingStats& globalStats, ReadingTimeBucket& bucketOut) {
   const auto& values = globalStats.timeOfDaySeconds;
   const uint32_t totalSeconds = std::accumulate(values.begin(), values.end(), 0u);
@@ -615,6 +696,29 @@ void drawBookText(const GfxRenderer& renderer, const Rect& text, const RecentBoo
 }
 }  // namespace
 
+#if CROSSINK_APP_READING_HEATMAP
+void DashboardHistory::load(const GlobalReadingStats* globalStats) {
+  ReadingStatsDateTime today;
+  available = getCurrentLocalDailyReadingDateTime(today) &&
+              DailyReadingStats::loadWindow(today.date, seconds.data(), seconds.size());
+  if (available) {
+    totalSeconds = DailyReadingStats::summarizeWindow(seconds.data(), seconds.size()).totalSeconds;
+    streak = globalStats ? globalStats->currentReadingStreak(&today.date) : 0;
+  }
+}
+
+void DashboardTheme::drawHomeHistory(const GfxRenderer& renderer, const Rect& tile, const DashboardHistory& history) {
+  Rect footer = layoutForContent(renderer, CalibratedThemeLayout::content(renderer, tile, true)).footer;
+  // Home's cover cache ends above the bezel. Use the space below it for the tappable reading history.
+  const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int bottomInset = UITheme::getInstance().getMetrics().contentSidePadding;
+  const int available = std::max(0, safe.y + safe.height - footer.y);
+  footer.height = available - std::clamp(available - footer.height, 0, bottomInset);
+  drawHistoryFooter(renderer, footer, history, true, true);
+  TouchRegistry::getInstance().add(footer, historyTouchId, TouchRegistry::Item);
+}
+#endif
+
 Rect DashboardTheme::getHomeCoverRect(const GfxRenderer& renderer) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
@@ -656,7 +760,9 @@ void DashboardTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const
 
   drawDashboardStats(renderer, layout.stats, stats, progressPercent, showBookStatsForPath(recentBooks[0].path));
   drawBookText(renderer, layout.text, recentBooks[0], currentChapterTitle);
-  if (SETTINGS.shouldTrackReadingStats()) drawFooterStats(renderer, layout.footer, globalStats);
+  if (SETTINGS.shouldTrackReadingStats() && !SETTINGS.shouldShowReadingHeatmap()) {
+    drawFooterStats(renderer, layout.footer, globalStats);
+  }
 }
 
 void DashboardTheme::drawSleepScreen(const GfxRenderer& renderer, const RecentBook& book, const BookReadingStats* stats,
@@ -671,5 +777,14 @@ void DashboardTheme::drawSleepScreen(const GfxRenderer& renderer, const RecentBo
   drawBookCover(renderer, coverRect, book, inverted ? Color::White : Color::Black);
   drawDashboardStats(renderer, layout.stats, stats, progressPercent, showBookStatsForPath(book.path), inverted);
   drawBookText(renderer, layout.text, book, currentChapterTitle, inverted);
-  if (SETTINGS.shouldTrackReadingStats()) drawFooterStats(renderer, layout.footer, globalStats, !inverted);
+  if (!SETTINGS.shouldTrackReadingStats()) return;
+#if CROSSINK_APP_READING_HEATMAP
+  if (SETTINGS.shouldShowReadingHeatmap()) {
+    DashboardHistory history;
+    history.load(globalStats);
+    drawHistoryFooter(renderer, layout.footer, history, inverted);
+    return;
+  }
+#endif
+  drawFooterStats(renderer, layout.footer, globalStats, !inverted);
 }

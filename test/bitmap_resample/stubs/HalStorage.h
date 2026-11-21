@@ -20,7 +20,11 @@ class HalFile : public Print {
 
   int read(void* buffer, size_t size) {
     const size_t available = data_.size() - std::min(position_, data_.size());
-    const size_t count = std::min(size, available);
+    size_t count = std::min(size, available);
+    if (position_ == shortReadPosition_) {
+      count = std::min<size_t>(2, count);
+      shortReadPosition_ = SIZE_MAX;
+    }
     std::memcpy(buffer, data_.data() + position_, count);
     position_ += count;
     bytesRead_ += count;
@@ -44,6 +48,7 @@ class HalFile : public Print {
 
   // Test hooks: bytes delivered through read(), and a way to force the
   // sequential-read fallback by failing relative seeks.
+  void shortReadOnceAt(size_t position) { shortReadPosition_ = position; }
   size_t bytesRead() const { return bytesRead_; }
   void setFailSeekCur(const bool fail) { failSeekCur_ = fail; }
 
@@ -53,5 +58,6 @@ class HalFile : public Print {
   std::vector<uint8_t> data_;
   size_t position_ = 0;
   size_t bytesRead_ = 0;
+  size_t shortReadPosition_ = SIZE_MAX;
   bool failSeekCur_ = false;
 };

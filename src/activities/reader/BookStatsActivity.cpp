@@ -2,6 +2,8 @@
 
 #include <I18n.h>
 
+#include <utility>
+
 #include "BookStatsView.h"
 #include "EpubReaderMenuModel.h"
 #include "FilenameFontSystem.h"
@@ -26,8 +28,14 @@ void drawPageIndicators(const GfxRenderer& renderer, const int currentPage, cons
   constexpr int kDotSpacing = 6;
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int totalDotWidth = totalPages * kDotSize + (totalPages - 1) * kDotSpacing;
+#if CROSSINK_APP_READING_HEATMAP
+  const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int dotsStartX = safe.x + (safe.width - totalDotWidth) / 2;
+  const int dotY = safe.y + safe.height - metrics.verticalSpacing - kDotSize / 2;
+#else
   const int dotsStartX = (renderer.getScreenWidth() - totalDotWidth) / 2;
   const int dotY = renderer.getScreenHeight() - UITheme::getButtonHintsReserve(renderer) - metrics.verticalSpacing - 4;
+#endif
   for (int pageIndex = 0; pageIndex < totalPages; ++pageIndex) {
     const int dotX = dotsStartX + pageIndex * (kDotSize + kDotSpacing);
     if (pageIndex == currentPage) {
@@ -85,6 +93,15 @@ void BookStatsActivity::loadDailySummary() {
   if (!halClock.isAvailable()) {
     return;
   }
+#if CROSSINK_APP_READING_HEATMAP
+  if (page == Page::History) {
+    // loadHistory already captured the local date, even if its six-month storage read failed.
+    if (historyToday.isValid()) {
+      dailySummary = DailyReadingStats::summarize(readingStatsDayIndex(historyToday), historySeconds, historyDays);
+    }
+    return;
+  }
+#endif
   ReadingStatsDateTime now;
   if (!getCurrentLocalDailyReadingDateTime(now)) {
     LOG_DBG("BookStats", "No local date for daily reading time");
@@ -93,6 +110,28 @@ void BookStatsActivity::loadDailySummary() {
 
   dailySummary = DailyReadingStats::summarize(readingStatsDayIndex(now.date));
 }
+
+#if CROSSINK_APP_READING_HEATMAP
+void BookStatsActivity::loadHistory() {
+  ReadingStatsDateTime now;
+  if (!getCurrentLocalDailyReadingDateTime(now)) {
+    historyToday.clear();
+    historyDays = 0;
+    return;
+  }
+  if (historyDays && compareReadingStatsDate(now.date, historyToday) == 0) return;
+  historyToday = now.date;
+  const size_t count = DailyReadingStats::sixMonthDayCount(now.date);
+  historyDays = count && DailyReadingStats::loadWindow(now.date, historySeconds, count) ? count : 0;
+}
+
+void BookStatsActivity::onFrontlightPanelClosed() {
+  if (page == Page::History && !SETTINGS.shouldShowReadingHeatmap()) {
+    page = showAllDevicesStats ? Page::AllDevices : Page::ThisDevice;
+  }
+  requestUpdate();
+}
+#endif
 
 void BookStatsActivity::saveStats() {
   if (!didChangeStats || !hasEditableBook()) {
@@ -166,17 +205,10 @@ void BookStatsActivity::applyCompletedState(const bool completed) {
     return;
   }
 
-  stats.isCompleted = completed;
-  if (completed) {
-    globalStats.completedBooks++;
-    if (!stats.finishedDateManual && !stats.finishedDate.isValid()) {
-      ReadingStatsDateTime now;
-      if (getCurrentLocalReadingStatsDateTime(now)) {
-        stats.finishedDate = now.date;
-      }
-    }
-  } else if (globalStats.completedBooks > 0) {
-    globalStats.completedBooks--;
+  globalStats.setCompleted(stats, completed, true);
+  if (completed && !stats.finishedDateManual && !stats.finishedDate.isValid()) {
+    ReadingStatsDateTime now;
+    if (getCurrentLocalReadingStatsDateTime(now)) stats.finishedDate = now.date;
   }
 }
 
@@ -308,7 +340,10 @@ void BookStatsActivity::onEnter() {
   ignoreInitialBackRelease = mappedInput.isPressed(MappedInputManager::Button::Back);
   ignoreInitialConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
   ignoreInitialPowerRelease = mappedInput.isPressed(MappedInputManager::Button::Power);
-  if (bookCachePath.empty()) page = Page::ThisDevice;
+  if (bookCachePath.empty() && page == Page::PerBook) page = Page::ThisDevice;
+#if CROSSINK_APP_READING_HEATMAP
+  if (page == Page::History) loadHistory();
+#endif
   loadDailySummary();
   previousOrientation = renderer.getOrientation();
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
@@ -343,10 +378,25 @@ bool BookStatsActivity::showNextStatsPage() {
     return true;
   }
 
+#if CROSSINK_APP_READING_HEATMAP
+  if (SETTINGS.shouldShowReadingHeatmap() && (page == Page::ThisDevice || page == Page::AllDevices)) {
+    loadHistory();
+    page = Page::History;
+    requestUpdate();
+    return true;
+  }
+#endif
   return false;
 }
 
 bool BookStatsActivity::showPreviousStatsPage() {
+#if CROSSINK_APP_READING_HEATMAP
+  if (page == Page::History) {
+    page = showAllDevicesStats ? Page::AllDevices : Page::ThisDevice;
+    requestUpdate();
+    return true;
+  }
+#endif
   if (page == Page::AllDevices) {
     page = Page::ThisDevice;
     requestUpdate();
@@ -562,17 +612,23 @@ void BookStatsActivity::loop() {
     return;
   }
 
-  if (page == Page::ThisDevice && showAllDevicesStats && downOrRightPressed) {
+  if (downOrRightPressed) {
     showNextStatsPage();
   }
 }
 
 void BookStatsActivity::render(RenderLock&&) {
+#if CROSSINK_APP_READING_HEATMAP
+  // Only the Dashboard heatmap shortcut requests a clean first frame.
+  const auto refresh = std::exchange(cleanHistoryOnOpen, false) ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH;
+#else
+  constexpr auto refresh = HalDisplay::FAST_REFRESH;
+#endif
   if (usesNoRtcSingleScreenLayout()) {
     renderNoRtcCombinedStatsPage(renderer, &mappedInput, bookTitle, stats, progressPercent, hasEstimatedTimeLeft,
                                  estimatedTimeLeftSeconds, globalStats,
                                  showAllDevicesStats ? &allDevicesStats : nullptr, true, canSyncReadingStats());
-    renderer.displayBuffer();
+    renderer.displayBuffer(refresh);
     return;
   }
 
@@ -583,17 +639,25 @@ void BookStatsActivity::render(RenderLock&&) {
       break;
     case Page::ThisDevice:
       renderGlobalStatsPage(renderer, &mappedInput, tr(STR_STATS_THIS_DEVICE_SCREEN), globalStats, true,
-                            showAllDevicesStats, &dailySummary, canSyncReadingStats());
+                            showAllDevicesStats || SETTINGS.shouldShowReadingHeatmap(), &dailySummary,
+                            canSyncReadingStats());
       break;
     case Page::AllDevices:
-      renderGlobalStatsPage(renderer, &mappedInput, tr(STR_STATS_ALL_DEVICES_SCREEN), allDevicesStats, true, false);
+      renderGlobalStatsPage(renderer, &mappedInput, tr(STR_STATS_ALL_DEVICES_SCREEN), allDevicesStats, true,
+                            SETTINGS.shouldShowReadingHeatmap());
+      break;
+    case Page::History:
+#if CROSSINK_APP_READING_HEATMAP
+      renderHeatmapStatsPage(renderer, mappedInput, historyToday, historySeconds, historyDays);
+#endif
       break;
     case Page::EditDates:
       renderEditBookDatesPage(renderer, &mappedInput, bookTitle, stats, selectedEditField, true);
       break;
   }
   if (page != Page::EditDates) {
-    drawPageIndicators(renderer, static_cast<int>(page), showAllDevicesStats ? 3 : 2);
+    const int pages = (showAllDevicesStats ? 3 : 2) + SETTINGS.shouldShowReadingHeatmap();
+    drawPageIndicators(renderer, page == Page::History ? pages - 1 : static_cast<int>(page), pages);
   }
-  renderer.displayBuffer();
+  renderer.displayBuffer(refresh);
 }

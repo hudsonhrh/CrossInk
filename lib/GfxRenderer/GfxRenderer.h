@@ -28,6 +28,8 @@ class SdCardFont;
 
 namespace glyphBitmap {
 struct Frame;
+struct Target;
+struct Clip;
 }
 
 // Color representation: uint8_t mapped to 4x4 Bayer matrix dithering levels
@@ -134,6 +136,8 @@ class GfxRenderer {
   void freeBitmapScratchBuffers();
   bool ensureBitmapScratchBuffers(size_t outputRowSize, size_t rowBytesSize) const;
   bool bitmapScratchLockHeldByCurrentTask() const;
+  glyphBitmap::Target packedBitmapTarget(const glyphBitmap::Frame& frame, glyphBitmap::Clip& clip) const;
+  void drawBitmapRow(const uint8_t* row, int first, int end, int x, int y, bool monochromeMask) const;
   void drawLegacyIcon(const uint8_t bitmap[], int x, int y, int width, int height, bool black) const;
   template <Color color>
   void drawPixelDither(int x, int y) const;
@@ -350,6 +354,9 @@ class GfxRenderer {
                                            int8_t spacing = 0) const;
   int getTextWidth(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR,
                    BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO, int8_t characterSpacing = 0) const;
+  // Zero if the string fits. Otherwise every prefix at or beyond the returned byte offset is too wide.
+  size_t getTextOverflowPrefix(int fontId, const char* text, size_t length, int widthLimit,
+                               int8_t characterSpacing = 0) const;
   void drawCenteredText(int fontId, int y, const char* text, bool black = true,
                         EpdFontFamily::Style style = EpdFontFamily::REGULAR,
                         BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO) const;

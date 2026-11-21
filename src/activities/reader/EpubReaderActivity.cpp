@@ -2105,8 +2105,7 @@ void EpubReaderActivity::applyBookStatsEditsFromDisk() {
     importBookStatsEdits(stats, BookReadingStats::load(epub->getCachePath()));
   }
 
-  const GlobalReadingStats diskGlobalStats = GlobalReadingStats::load();
-  globalStats.completedBooks = diskGlobalStats.completedBooks;
+  importGlobalCompletionEdits(globalStats, GlobalReadingStats::load());
 }
 
 void EpubReaderActivity::handleBookStatsReturn(const bool returnToReaderMenu) {
@@ -2760,6 +2759,7 @@ void EpubReaderActivity::openReaderMenu() {
   uint32_t stableCurrentPage = 0;
   uint32_t stablePageCount = 0;
   bool isBookCompleted;
+  bool isArticle;
   bool previewActive = false;
   // Only the button menu has a book header to show it in.
   const bool showChapterTitle = !mappedInput.hasTouchHardware();
@@ -2788,6 +2788,7 @@ void EpubReaderActivity::openReaderMenu() {
       epub->resolveReferencePage(currentSpineIndex, sectionProgress, stableCurrentPage, resolvedPageCount);
     }
     isBookCompleted = stats.isCompleted;
+    isArticle = stats.isArticle;
     bookProgress = getCurrentBookProgressPercent();
     if (showChapterTitle && !previewActive) chapterTitle = currentChapterTitle();
   }
@@ -2831,6 +2832,7 @@ void EpubReaderActivity::openReaderMenu() {
     requestUpdate();
     return;
   }
+  menuActivity->setArticle(isArticle);
   menuActivity->setChapterTitle(std::move(chapterTitle));
 #if CROSSINK_SCALABLE_FONTS
   menuActivity->setPublisherBodyFontProbe(
@@ -2931,7 +2933,7 @@ void EpubReaderActivity::openReaderMenu() {
       }
       if (menu->reopenDrawer &&
           (action == EpubReaderMenuAction::BOOKMARK_TOGGLE || action == EpubReaderMenuAction::TOGGLE_COMPLETED ||
-           action == EpubReaderMenuAction::RESET_READING_PACE ||
+           action == EpubReaderMenuAction::TOGGLE_ARTICLE || action == EpubReaderMenuAction::RESET_READING_PACE ||
            action == EpubReaderMenuAction::TOGGLE_BOOK_STATS_TRACKING)) {
         openReaderMenu();
       }
@@ -4584,6 +4586,18 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuAction action, const 
       });
       break;
     }
+    case EpubReaderMenuAction::TOGGLE_ARTICLE: {
+      if (!epub) break;
+      bool article = false;
+      if (GlobalReadingStats::toggleArticle(epub->getCachePath(), article, &stats, &globalStats.counterId)) {
+        refreshGlobalStatsAfterOverlay(globalStats, GlobalReadingStats::localResetRevision());
+        pendingSync.mark(epub->getPath(), SyncPending::STATS_BIT);
+      } else {
+        drawToast(renderer, tr(STR_SAVE_TYPE_FAILED));
+        delay(1000);
+      }
+      break;
+    }
     case EpubReaderMenuAction::TOGGLE_BOOK_STATS_TRACKING: {
       if (!epub || !SETTINGS.shouldTrackReadingStats()) break;
       const bool enabled = !bookStatsEnabled;
@@ -5258,6 +5272,7 @@ void EpubReaderActivity::startClipSelection(const DictionaryClippingRequest* dic
         if (textPoolFull) return false;
         const auto& block = *line.block;
         const uint16_t count = block.wordCount();
+        uint16_t previousBlockIndex = UINT16_MAX;
         for (uint16_t i = 0; i < count; ++i) {
           const char* wordText = block.wordText(i);
           if (!hasVisibleWordText(wordText)) continue;
@@ -5299,6 +5314,13 @@ void EpubReaderActivity::startClipSelection(const DictionaryClippingRequest* dic
           word.style = textStyle;
           word.endsWithInsertedHyphen = block.wordEndsWithInsertedHyphen(i);
           word.lineIsRtl = block.getBlockStyle().isRtl;
+          // A skipped token can itself be the space (e.g. an EPUB nonbreaking space).
+          if (previousBlockIndex + 1 == i && !block.wordHasSpaceBefore(i)) {
+            // Publishers can also use CSS inline padding as a visible separator.
+            const auto& previous = wordStore.words.back();
+            word.attachedToPrevious = word.x <= previous.x + previous.w + 2 && previous.x <= word.x + word.w + 2;
+          }
+          previousBlockIndex = i;
           wordStore.words.push_back(word);
         }
         return !textPoolFull && wordStore.words.size() < maxSelectableWords;
@@ -6149,7 +6171,7 @@ void EpubReaderActivity::setBookCompleted(bool isCompleted) {
     return;
   }
 
-  stats.isCompleted = isCompleted;
+  const bool countChanged = globalStats.setCompleted(stats, isCompleted, statsTrackingActive);
   if (isCompleted && statsTrackingActive && !stats.finishedDateManual) {
     ReadingStatsDateTime now;
     if (getCurrentLocalReadingStatsDateTime(now)) {
@@ -6175,14 +6197,7 @@ void EpubReaderActivity::setBookCompleted(bool isCompleted) {
   if (!stats.save(epub->getCachePath())) return;
   pendingSync.mark(epub->getPath(), SyncPending::STATS_BIT);
   BookSyncFile::onFinishedChanged(epub->getPath(), isCompleted);
-  if (statsTrackingActive) {
-    if (isCompleted) {
-      globalStats.completedBooks++;
-    } else if (globalStats.completedBooks > 0) {
-      globalStats.completedBooks--;
-    }
-    globalStats.save();
-  }
+  if (countChanged) globalStats.saveSnapshot();
 }
 
 void EpubReaderActivity::showCompletedFeedback(bool isCompleted) {
@@ -6694,7 +6709,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       endOfBookOptions->render(renderer, mappedInput);
     }
     openingFeedback.finish();
-    renderer.displayBuffer();
+    renderer.displayBuffer(pageToneHistory.monochromeScreenMode());
     pageBufferStale.store(false, std::memory_order_relaxed);
     automaticPageTurnActive = false;
     showPendingSyncSaveError();
@@ -7298,7 +7313,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     renderer.drawCenteredText(UI_12_FONT_ID, ReaderUtils::messageCenterY(renderer), tr(STR_EMPTY_CHAPTER),
                               ReaderUtils::readerForegroundBlack(), EpdFontFamily::BOLD);
     renderStatusBar();
-    renderer.displayBuffer();
+    renderer.displayBuffer(pageToneHistory.monochromeScreenMode());
     pageBufferStale.store(false, std::memory_order_relaxed);
     automaticPageTurnActive = false;
     showPendingSyncSaveError();
@@ -7311,7 +7326,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     renderer.drawCenteredText(UI_12_FONT_ID, ReaderUtils::messageCenterY(renderer), tr(STR_OUT_OF_BOUNDS),
                               ReaderUtils::readerForegroundBlack(), EpdFontFamily::BOLD);
     renderStatusBar();
-    renderer.displayBuffer();
+    renderer.displayBuffer(pageToneHistory.monochromeScreenMode());
     pageBufferStale.store(false, std::memory_order_relaxed);
     automaticPageTurnActive = false;
     showPendingSyncSaveError();
@@ -7342,7 +7357,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       renderer.drawCenteredText(UI_12_FONT_ID, ReaderUtils::messageCenterY(renderer), tr(STR_PAGE_LOAD_ERROR),
                                 ReaderUtils::readerForegroundBlack(), EpdFontFamily::BOLD);
       renderStatusBar();
-      renderer.displayBuffer();
+      renderer.displayBuffer(pageToneHistory.monochromeScreenMode());
       pageBufferStale.store(false, std::memory_order_relaxed);
       automaticPageTurnActive = false;
       showPendingSyncSaveError();
@@ -8096,6 +8111,24 @@ bool EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int fo
   if (!updatePanel) {
     return true;
   }
+  if (deferQueuedTurnRendering) {
+    // This page is already being replaced. Keep any pending manual or image
+    // scrub for the settled page and avoid a flashing intermediate preview.
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    return true;
+  }
+  const bool presentingImage = pageHasImages && !deferImageLoading;
+  using ReaderUtils::PageTone;
+  const bool needsAnyGrayscale = needsTextGrayscale || needsImageGrayscale;
+  const auto tone = !needsAnyGrayscale ? PageTone::Monochrome
+                    : presentingImage  ? PageTone::GrayImage
+                                       : PageTone::GrayText;
+  if (pageToneHistory.advanceTo(tone)) pagesUntilFullRefresh = std::min(pagesUntilFullRefresh, 1);
+  auto imageBaseMode = HalDisplay::FAST_REFRESH;
+  if (presentingImage) {
+    if (cleanImageBasePending) pagesUntilFullRefresh = std::min(pagesUntilFullRefresh, 1);
+    imageBaseMode = ReaderUtils::takePageRefreshMode(pagesUntilFullRefresh);
+  }
   const auto displayMonochromePage = [&]() {
     renderer.setRenderMode(GfxRenderer::BW);
     renderer.clearScreen(ReaderUtils::readerBackgroundColor());
@@ -8117,15 +8150,20 @@ bool EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int fo
   constexpr bool absoluteImageGrayscale = false;
 #endif
   if (absoluteImageGrayscale && ReaderUtils::allocateDeferredGrayscalePlanes(renderer, deferredGrayscalePlanes)) {
-    const auto baseMode = pagesUntilFullRefresh < 0 ? manualScreenRefreshMode()
-                          : cleanImageBasePending   ? HalDisplay::HALF_REFRESH
-                                                    : HalDisplay::FAST_REFRESH;
     if (pendingFontDamagedToast) drawRenderModeToastBuffer(tr(STR_FONT_DAMAGED));
     // Preserve manual/strong cleanup turns. On ordinary image turns the
     // controller may fold the base into its complete-plane waveform.
-    const bool directImagePass = baseMode == HalDisplay::FAST_REFRESH && renderer.supportsDirectGrayscale();
-    if ((directImagePass && renderer.displayDirectGrayscaleBase(baseMode)) ||
-        renderer.displayAbsoluteGrayscaleBase(baseMode)) {
+    const bool directImagePass = imageBaseMode == HalDisplay::FAST_REFRESH && renderer.supportsDirectGrayscale();
+#ifndef SIMULATOR
+    // A combined absolute-image driver only stages masks. A separate-base
+    // driver paints the requested cleanup inside displayAbsoluteGrayscaleBase.
+    if (imageBaseMode != HalDisplay::FAST_REFRESH &&
+        display.grayscaleCapabilities(HalDisplay::GrayscaleMode::Absolute).base == HalDisplay::GrayscaleBase::Combined) {
+      renderer.displayBuffer(imageBaseMode);
+    }
+#endif
+    if ((directImagePass && renderer.displayDirectGrayscaleBase(imageBaseMode)) ||
+        renderer.displayAbsoluteGrayscaleBase(imageBaseMode)) {
       auto renderImageOverlays = [&]() {
         finalizeBufferComposition();
         renderStatusBar();
@@ -8137,14 +8175,12 @@ bool EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int fo
               [](void* context) { (*static_cast<const decltype(renderImageOverlays)*>(context))(); },
               &renderImageOverlays, needsTextGrayscale, foregroundBlack)) {
         cleanImageBasePending = false;
-        pagesUntilFullRefresh = 1;
         return true;
       }
       return displayMonochromePage();
     }
     LOG_ERR("ERS", "Absolute image grayscale unavailable; using overlay");
   }
-  const bool needsAnyGrayscale = needsTextGrayscale || needsImageGrayscale;
   if (needsAnyGrayscale && !pageHasImages &&
       ReaderUtils::displayDeferredGrayscale(renderer, pagesUntilFullRefresh, deferredGrayscalePlanes, [&]() {
         composeGrayscaleBuffer();
@@ -8153,8 +8189,9 @@ bool EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int fo
     return true;
   const bool tiledGrayscale = needsAnyGrayscale && renderer.supportsStripGrayscale();
   const bool overlapRefresh =
-      tiledGrayscale && !pageHasImages && pagesUntilFullRefresh > 1 && renderer.supportsAsyncGrayscaleBase();
-  if (pageHasImages && !deferImageLoading) {
+      tiledGrayscale && !pageHasImages && pagesUntilFullRefresh > 1 && renderer.supportsAsyncGrayscaleBase() &&
+      !renderer.combinesGrayscaleBase();
+  if (presentingImage) {
     // Keep the legacy blank/base sequence unless the controller can transition
     // directly to the complete image base.
     int16_t imgX, imgY, imgW, imgH;
@@ -8165,15 +8202,9 @@ bool EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int fo
       const bool blankImage = !directImageBase || cleanImageBasePending;
       if (blankImage) {
         renderer.fillRect(imgX + orientedMarginLeft, imgY + orientedMarginTop, imgW, imgH, false);
-      }
-      if (cleanImageBasePending) {
-        renderer.displayBuffer(pagesUntilFullRefresh < 0 ? manualScreenRefreshMode() : HalDisplay::HALF_REFRESH);
-        cleanImageBasePending = false;
-      }
-      if (!directImageBase) {
-        renderer.displayBuffer(HalDisplay::FAST_REFRESH);
-      }
-      if (blankImage) {
+        // The existing blanking pass can do the scheduled scrub. Avoid a second
+        // activation of the same blank frame before restoring the artwork.
+        renderer.displayBuffer(imageBaseMode);
         // Restore the composed image after legacy blanking or strong cleanup.
         composePageBuffer();
       }
@@ -8181,43 +8212,20 @@ bool EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int fo
       // The restored image frame becomes the base for the grayscale image
       // planes below. On X3, use the same grayscale-aware base waveform as
       // text-only grayscale turns; other panels keep the FAST fallback behavior.
+      const auto finalBaseMode = blankImage ? HalDisplay::FAST_REFRESH : imageBaseMode;
       if (needsAnyGrayscale) {
-        renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
+        renderer.displayGrayscaleBase(finalBaseMode);
       } else {
-        renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+        renderer.displayBuffer(finalBaseMode);
       }
     } else {
       if (pendingFontDamagedToast) drawRenderModeToastBuffer(tr(STR_FONT_DAMAGED));
-      renderer.displayBuffer(pagesUntilFullRefresh < 0 ? manualScreenRefreshMode() : HalDisplay::HALF_REFRESH);
+      renderer.displayBuffer(imageBaseMode == HalDisplay::FAST_REFRESH ? HalDisplay::HALF_REFRESH : imageBaseMode);
     }
-    // The image's own page is handled above and doesn't count toward the full
-    // refresh cadence. A grayscale pass leaves gray charge that a fast diff on
-    // the next page can't clear (#2190), so only grayscale pages force that
-    // next ordinary page onto the HALF ghost-cleanup path.
-    if (needsAnyGrayscale) {
-      pagesUntilFullRefresh = 1;
-    }
+    cleanImageBasePending = false;
   } else if (needsAnyGrayscale) {
-    if (renderer.combinesGrayscaleBase()) {
-      // Begin the combined pass even on cleanup turns: the driver cleans first,
-      // then stages the same text waveform as ordinary turns.
-      ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, ReaderUtils::PageRefresh::GrayscaleBase);
-    } else if (pagesUntilFullRefresh <= 1) {
-      // Cleanup turns still need the stronger HALF pass, but X3 grayscale
-      // overlays settle better if the OEM precondition step runs before the
-      // gray planes are written.
-      renderer.displayBuffer(pagesUntilFullRefresh < 0 ? manualScreenRefreshMode() : HalDisplay::HALF_REFRESH);
-      renderer.preconditionGrayscale();
-      pagesUntilFullRefresh = SETTINGS.getRefreshFrequency();
-    } else if (overlapRefresh) {
-      ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, ReaderUtils::PageRefresh::Async);
-    } else {
-      // Use the grayscale-aware base waveform so the first visible pass is
-      // closer to the final anti-aliased result instead of flashing darker
-      // text first and softening after the grayscale overlay.
-      renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
-      pagesUntilFullRefresh--;
-    }
+    const auto request = overlapRefresh ? ReaderUtils::PageRefresh::Async : ReaderUtils::PageRefresh::GrayscaleBase;
+    ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, request);
   } else {
     ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
   }

@@ -114,6 +114,7 @@ add_subdirectory(opds_parser)
 add_subdirectory(library_text)
 add_subdirectory(library_format)
 add_subdirectory(library_index_file)
+add_subdirectory(file_index)
 add_subdirectory(content_opf_parser)
 add_subdirectory(adobe_font_obfuscation)
 add_subdirectory(library_builder)
@@ -156,6 +157,8 @@ add_test(NAME StorageAndBrowsingRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_storage_and_browsing_ports.py)
 add_test(NAME PiccoSleepRenderLockRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/scripts/test_picco_sleep_render_lock.py)
+add_test(NAME TxtIndexRecovery
+  COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_txt_index_recovery.py)
 add_test(NAME RecentTxtProgressRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_recent_txt_progress.py)
 add_test(NAME DecodedImageRevisionRegression
@@ -177,6 +180,10 @@ add_test(NAME LanguageAssetPublicationRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_language_asset_publication.py)
 add_test(NAME ReleaseDownloadPreparationRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_release_download_preparation.py)
+add_test(NAME SleepImageRefreshRegression
+  COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_sleep_image_refresh.py)
+add_test(NAME StatsNavigationRefreshRegression
+  COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_stats_navigation_refresh.py)
 add_test(NAME SleepChargeOverlayRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_sleep_charge_overlay.py)
 add_test(NAME DisplaySdkCompatibilityRegression

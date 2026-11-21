@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <limits>
+#include <utility>
 #include <vector>
 
 using namespace xtc;
@@ -103,6 +104,121 @@ INSTANTIATE_TEST_SUITE_P(Containers, XtcParserDepth,
                                            DepthCase{"XtcWithXthPages", XTC_MAGIC, XTH_MAGIC, 2},
                                            DepthCase{"XtchWithXtgPages", XTCH_MAGIC, XTG_MAGIC, 1}),
                          [](const ::testing::TestParamInfo<DepthCase>& info) { return info.param.name; });
+
+TEST(XtcParser, ShortXtchStreamReportsErrorAfterPartialSecondPlane) {
+  auto book = buildBook(XTCH_MAGIC, XTH_MAGIC);
+  book.pop_back();
+  Storage.setFile(kPath, book);
+  XtcParser parser;
+  ASSERT_EQ(parser.open(kPath), XtcError::OK);
+  size_t received = 0;
+  const auto error = parser.loadPageStreaming(
+      0,
+      [&](const uint8_t*, size_t size, size_t offset) {
+        EXPECT_EQ(received, offset);
+        received += size;
+      },
+      3);
+  EXPECT_EQ(error, XtcError::READ_ERROR);
+  EXPECT_EQ(received, payloadSize(XTH_MAGIC) - 1);
+}
+
+TEST(XtcParser, MixedSizeXtgUsesEachPagesBytePaddedRows) {
+  // A 16x8 cover, a 3x2 interior page and a 17x10 page exercise both directions.
+  const std::pair<uint16_t, uint16_t> shapes[] = {{16, 8}, {3, 2}, {17, 10}};
+  XtcHeader header{};
+  header.magic = XTC_MAGIC;
+  header.versionMajor = 1;
+  header.pageCount = 3;
+  header.pageTableOffset = sizeof(XtcHeader);
+  header.dataOffset = sizeof(XtcHeader) + 3 * sizeof(PageTableEntry);
+  std::vector<uint8_t> bytes(header.dataOffset);
+  std::memcpy(bytes.data(), &header, sizeof(header));
+  for (int i = 0; i < 3; ++i) {
+    const auto [w, h] = shapes[i];
+    const uint32_t payload = ((w + 7u) / 8) * h;
+    const XtgPageHeader page{XTG_MAGIC, w, h, 0, 0, payload, 0};
+    const PageTableEntry entry{bytes.size(), static_cast<uint32_t>(sizeof(page)) + payload, w, h};
+    std::memcpy(bytes.data() + header.pageTableOffset + i * sizeof(entry), &entry, sizeof(entry));
+    bytes.resize(bytes.size() + entry.dataSize, 10 + i);
+    std::memcpy(bytes.data() + entry.dataOffset, &page, sizeof(page));
+  }
+  Storage.setFile(kPath, std::move(bytes));
+  XtcParser parser;
+  ASSERT_EQ(parser.open(kPath), XtcError::OK);
+  for (int i : {0, 2, 1, 0}) {
+    PageInfo info{};
+    ASSERT_TRUE(parser.getPageInfo(i, info));
+    EXPECT_EQ(info.width, shapes[i].first);
+    EXPECT_EQ(info.height, shapes[i].second);
+    std::vector<uint8_t> bitmap(xtgPageBytes(info.width, info.height));
+    ASSERT_EQ(parser.loadPage(i, bitmap.data(), bitmap.size()), bitmap.size());
+    for (auto px : bitmap) EXPECT_EQ(px, 10 + i);
+  }
+}
+
+TEST(XtcParser, RejectsDisagreementBeforePublishingAnyPixels) {
+  for (int damage = 0; damage < 4; ++damage) {
+    auto bytes = buildBook(XTC_MAGIC, XTG_MAGIC);
+    PageTableEntry entry{};
+    std::memcpy(&entry, bytes.data() + sizeof(XtcHeader), sizeof(entry));
+    XtgPageHeader page{};
+    std::memcpy(&page, bytes.data() + entry.dataOffset, sizeof(page));
+    if (damage == 0) page.width--;  // Same byte length; dimensions still matter.
+    if (damage == 1) page.dataSize--;
+    if (damage == 2) entry.dataSize--;  // Payload would spill into the next entry.
+    if (damage == 3) page.compression = 1;
+    std::memcpy(bytes.data() + sizeof(XtcHeader), &entry, sizeof(entry));
+    std::memcpy(bytes.data() + entry.dataOffset, &page, sizeof(page));
+    Storage.setFile(kPath, std::move(bytes));
+    XtcParser parser;
+    ASSERT_EQ(parser.open(kPath), XtcError::OK);
+    uint8_t buffer[64]{};
+    EXPECT_EQ(parser.loadPage(0, buffer, sizeof(buffer)), 0u);
+    EXPECT_EQ(parser.getLastError(), XtcError::CORRUPTED_HEADER);
+    EXPECT_EQ(parser.loadPageStreaming(0, [](const uint8_t*, size_t, size_t) { ADD_FAILURE(); }),
+              XtcError::CORRUPTED_HEADER);
+  }
+}
+
+TEST(XtcParser, OddHeightXthPreservesTheLastColumnAndThePlaneBoundary) {
+  auto bytes = buildBook(XTCH_MAGIC, XTH_MAGIC);
+  constexpr uint16_t w = 3, h = 9;
+  constexpr uint8_t pixels[] = {0x80, 0, 0x20, 0, 0, 0x80, 0, 0x80, 1, 0, 0x80, 0};
+  XtgPageHeader page{XTH_MAGIC, w, h, 0, 0, sizeof(pixels), 0};
+  PageTableEntry entry{sizeof(XtcHeader) + sizeof(PageTableEntry), sizeof(page) + sizeof(pixels), w, h};
+  bytes.resize(entry.dataOffset + entry.dataSize);
+  std::memcpy(bytes.data() + sizeof(XtcHeader), &entry, sizeof(entry));
+  std::memcpy(bytes.data() + entry.dataOffset, &page, sizeof(page));
+  std::memcpy(bytes.data() + entry.dataOffset + sizeof(page), pixels, sizeof(pixels));
+  Storage.setFile(kPath, std::move(bytes));
+  XtcParser parser;
+  ASSERT_EQ(parser.open(kPath), XtcError::OK);
+  uint8_t buffer[sizeof(pixels)]{};
+  EXPECT_EQ(parser.loadPage(0, buffer, sizeof(buffer)), sizeof(pixels));
+  EXPECT_EQ(std::memcmp(buffer, pixels, sizeof(pixels)), 0);
+  std::vector<uint8_t> actual;
+  ASSERT_EQ(parser.loadPageStreaming(0, [&](const uint8_t* data, size_t size, size_t) {
+              actual.insert(actual.end(), data, data + size);
+            }, 5), XtcError::OK);
+  EXPECT_EQ(actual, std::vector<uint8_t>(std::begin(pixels), std::end(pixels)));
+}
+
+TEST(XtcParser, SignedSdReadFailureStopsStreamAndNextReadRecovers) {
+  Storage.setFile(kPath, buildBook(XTCH_MAGIC, XTH_MAGIC));
+  XtcParser parser;
+  ASSERT_EQ(parser.open(kPath), XtcError::OK);
+  HalFile::failedReadOffset = sizeof(XtcHeader) + sizeof(PageTableEntry) + sizeof(XtgPageHeader) + 9;
+  size_t calls = 0;
+  const auto error = parser.loadPageStreaming(0, [&](const uint8_t*, size_t size, size_t offset) {
+    EXPECT_EQ(size, 3u);
+    EXPECT_EQ(offset, 3 * calls++);
+  }, 3);
+  HalFile::failedReadOffset = UINT64_MAX;
+  EXPECT_EQ(error, XtcError::READ_ERROR);
+  EXPECT_EQ(calls, 3u);
+  EXPECT_EQ(parser.loadPageStreaming(0, [](const uint8_t*, size_t, size_t) {}, 5), XtcError::OK);
+}
 
 // An unknown first-page magic does not override the container; the page is still rejected.
 TEST(XtcParser, UnknownPageMagicKeepsContainerDepth) {

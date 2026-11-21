@@ -2,6 +2,8 @@
 
 ### Added
 
+- On X4 Pro, the Dashboard shows the last 30 days of reading time and your current streak. Tap the grid or open the last page of Reading Stats to explore the last 30 days and a six-month calendar. The six-month grid spans the screen in one strip, with one column per week. The shading extends to a three-hour top bracket for frequent long readers. Turn off **Show Reading Heatmap** in Reading Stats settings to restore the original Dashboard footer.
+- Mark an EPUB as a short read from the Library, File Browser, or reader Settings. Reading Stats shows Books Read until you mark your first short read, then shows both completion counts. Choose Articles in Reading Stats settings if you prefer that label.
 - Support BOOX Picco and EEGO Reader A4 with touch, frontlight controls, and USB Drive support. Picco also supports its slide switch and tilt page turns.
 - Connect a reader to a computer running a compatible version of Inky to sync reading progress over USB. Reading stats and clippings can also sync using the computer’s internet connection.
 - Sync a selected EPUB’s progress or XTC’s reading stats from Library or File Browser. Sync Books under File Transfer covers the entire SD card. Both folder and whole-card sync include XTC stats, and compatible servers batch folder requests.
@@ -35,6 +37,23 @@
 
 ### Changed
 
+- Opening a BMP or PNG shows one loading notice before the picture. Dismissing the image menu restores the picture directly.
+- Touch Dashboard and Minimal Home avoid a redundant screen update when opening a book. When Home generates covers, the loading notice and its first progress bar appear together.
+- Browsing an indexed Library with many folders reuses folder positions while scrolling. Existing library indexes benefit immediately.
+- On X4 Pro, opening Device Activity from the Dashboard reuses the heatmap data for today's reading time and the seven-day average, avoiding a second search of the card.
+- Upright XTCH comic pages that are smaller or larger than the display render cropped edges and margins more efficiently. Black-and-white pages skip unnecessary grayscale passes, and readers with enough PSRAM can prepare four-tone pages in one read.
+- Returning to Home after reading a new grayscale XTCH book is faster. The reader builds cover thumbnails by converting several rows together.
+- File Browser opens large folders faster on the first visit by sorting filenames with fewer SD reads, seeks and flushes.
+- Illustrated EPUBs with chapters stored out of reading order open faster on the first visit. The reader batches chapter-size lookups when it encounters this layout.
+- Plain-text books index faster on first open, especially with long paragraphs. Indexing reads each byte once and keeps your reading position if an SD read fails.
+- EPUBs with chapter-heavy tables of contents open faster. English-language chapters also spend less time checking word breaks.
+- Grayscale XTCH page turns process panel-sized portrait pages in packed bytes. Black-and-white pages skip the gray refresh, and status text stays solid black over grayscale pages.
+- Four-tone BMP covers and sleep images draw faster. Resizing a truecolor BMP reads each source row once.
+- Cached EPUB text pages load with fewer SD reads. Optimized EPUB images also import faster, especially when the supplied image already matches the displayed size.
+- Plain-text pages skip unnecessary line measurements. Monochrome XTC page turns and sleep backgrounds skip blank pixels and draw solid spans together. Straight rules, underlines, and borders also take less time to draw.
+- Reading Stats and the Dashboard heatmap read daily history in larger batches. EPUB paragraph and list-item jumps also use fewer SD reads in cached chapters.
+- Assembling a long EPUB clipping reuses one output buffer, reducing temporary allocations for long words and mixed-script text.
+- Cycle through up to three recent books on Dashboard Home. Swipe left on a touchscreen or hold the front Back button on a button reader.
 - `Settings > System > KOReader Sync` is now `Sync Server`. Reading Stats and Clippings are opt-in under `What to Sync` and require server support.
 - English is the only built-in interface language. Download other languages through Language settings. On PSRAM-equipped devices with small factory data partitions, including X4 Pro, language and hyphenation packs can use an SD cache without repartitioning.
 - Battery display is now set per status bar and carries over the old Hide Battery % preference.
@@ -51,6 +70,21 @@
 
 ### Fixed
 
+- On X4 Pro, turning from a grayscale XTCH page to black-and-white content drives the new page across the whole panel to clear residual gray.
+- Illustrated EPUB pages now follow the selected page refresh interval, including consecutive pages with images.
+- On X4 Pro, going to sleep with a custom image or book cover erases the outgoing page earlier, reducing the ink that can show through the artwork.
+
+- On X4 Pro, grayscale sleep artwork clears the previous image first. Reading Stats uses fast refreshes between tabs and cleans the panel when opening Device Activity from the Dashboard heatmap or returning Home. Refresh Screen uses the all-pixel cleanup on UltraChip X4 Pro panels.
+- Opening a grayscale XTCH book whose cover height is not a multiple of eight repairs older distorted thumbnails and sleep covers while preserving the saved page.
+- Plain-text books keep the current passage when font, orientation or ruling changes immediately after a page turn. An interrupted bookmark save can recover the previous position. SD bitmap fonts paginate correctly on single-reader cards, and an 8 KiB text read boundary preserves complete UTF-8 characters and CRLF line breaks.
+- Mixed-size XTC pages render at their own dimensions in the reader and on the Current Page sleep screen. Odd-height XTCH pages retain their bottom edge.
+- EPUB contents links to repeated chapters consistently use the first matching spine position. An interrupted metadata cache rebuild can recover its previous index.
+
+- On X3, plain-text pages with text smoothing now use the same calibrated transition as EPUB pages, including the settling step after a scheduled or manual screen cleanup.
+- Marking an EPUB as a book or short read preserves its current reading history when a stats file temporarily cannot be read, including after an interrupted classification change.
+- A partial EPUB clipping ending at an authored hyphen keeps that hyphen when the layout adds another one later in the same word.
+- New EPUB clippings preserve spaces between tightly set words in View Clippings and `My Clippings.txt` (#968).
+- On X4 Pro, Reading Stats keeps its page indicators above the calibrated screen edge. Pausing reading-stat tracking preserves the Dashboard book cover.
 - Credit EPUB and XTC reading to the correct local day across midnight. Preserve live stats if a save fails, retry updates after SD errors, and finish pending saves before sleep, reader restart, or USB Drive handoff.
 - Preserve unreadable stats and offer to restore them from a verified backup. Keep daily, manual, and clockless backups separate and prune numbered backups in the correct order beyond 999.
 - Sync EPUB positions more accurately in bare body text, nested markup, deep chapters, and the first chapter. Use the configured Document Matching method and each book’s render-mode cache, accept percentage-only positions, and skip uploads when a position cannot be mapped. Return to the original Library or File Browser view after context-menu sync (CrossPoint #3923 and #4472, CrossInk #853).

@@ -893,15 +893,8 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
   renderer.drawGlyphBitmap(bitmap, width, height, frame, is2Bit, renderMode, pixelState);
 }
 
-// Draw an unscaled glyph placed by a logical frame. Equivalent to calling
-// drawPixel() for each ink pixel, but the clip test, orientation rotation,
-// strip-band check and address math are resolved once per glyph rather than
-// once per pixel.
-void GfxRenderer::drawGlyphBitmap(const uint8_t* bitmap, const int width, const int height,
-                                  const glyphBitmap::Frame& frame, const bool twoBit, const RenderMode mode,
-                                  const bool state) const {
-  // Apply the logical clip rectangle before rotating, in glyph-local pixels.
-  glyphBitmap::Clip clip{0, 0, width, height};
+glyphBitmap::Target GfxRenderer::packedBitmapTarget(const glyphBitmap::Frame& frame, glyphBitmap::Clip& clip) const {
+  // Apply the logical text clip in source pixels before rotating to the panel.
   if (textClipActive_) {
     glyphBitmap::clipToRect(frame, textClipLeft_, textClipTop_, textClipRight_, textClipBottom_, clip);
   }
@@ -909,9 +902,7 @@ void GfxRenderer::drawGlyphBitmap(const uint8_t* bitmap, const int width, const 
   // Writes go to the framebuffer, or to the strip scratch in tiled grayscale
   // mode; getWriteOriginY()/getWriteRows() bound the rows that exist there.
   glyphBitmap::Target target{getWriteTarget(), panelWidth, panelWidthBytes, getWriteOriginY(), getWriteRows(), {}};
-  // Rotate the glyph origin once, then derive the two physical axes by
-  // rotating its neighbours along each logical axis. Together these encode
-  // the text rotation and the panel orientation as one orthogonal transform.
+  // Map the source origin and its unit steps through both the source and panel rotations.
   glyphBitmap::Frame& physical = target.frame;
   rotateCoordinates(orientation, frame.x, frame.y, &physical.x, &physical.y, panelWidth, panelHeight);
   int nextX, nextY;
@@ -922,6 +913,18 @@ void GfxRenderer::drawGlyphBitmap(const uint8_t* bitmap, const int width, const 
   physical.dyX = nextX - physical.x;
   physical.dyY = nextY - physical.y;
 
+  return target;
+}
+
+// Draw an unscaled glyph placed by a logical frame. Equivalent to calling
+// drawPixel() for each ink pixel, but the clip test, orientation rotation,
+// strip-band check and address math are resolved once per glyph rather than
+// once per pixel.
+void GfxRenderer::drawGlyphBitmap(const uint8_t* bitmap, const int width, const int height,
+                                  const glyphBitmap::Frame& frame, const bool twoBit, const RenderMode mode,
+                                  const bool state) const {
+  glyphBitmap::Clip clip{0, 0, width, height};
+  const auto target = packedBitmapTarget(frame, clip);
   const glyphBitmap::Plane plane = mode == BW              ? glyphBitmap::Plane::BW
                                    : mode == GRAYSCALE_MSB ? glyphBitmap::Plane::GrayMSB
                                                            : glyphBitmap::Plane::GrayLSB;
@@ -1033,19 +1036,16 @@ uint32_t smallCapsUppercaseCodepoint(const uint32_t cp) {
   return cp - 0x20;                                    // Cyrillic main block (а-я)
 }
 
+bool mayNeedBidi(const char* text) {
+  for (const unsigned char* q = reinterpret_cast<const unsigned char*>(text); *q; ++q) {
+    if (*q >= 0xD6 && *q <= 0xDB) return true;
+  }
+  return false;
+}
+
 const char* resolveVisualText(const char* text, std::string& visualBuffer, const BidiUtils::BidiBaseDir baseDir) {
   if (!text || *text == '\0') return text;
-
-  if (baseDir != BidiUtils::BidiBaseDir::RTL) {
-    bool hasRtlBytes = false;
-    for (const unsigned char* q = reinterpret_cast<const unsigned char*>(text); *q; ++q) {
-      if (*q >= 0xD6 && *q <= 0xDB) {
-        hasRtlBytes = true;
-        break;
-      }
-    }
-    if (!hasRtlBytes) return text;
-  }
+  if (baseDir != BidiUtils::BidiBaseDir::RTL && !mayNeedBidi(text)) return text;
 
   if (BidiUtils::applyBidiVisual(text, visualBuffer, static_cast<int>(baseDir)) && !visualBuffer.empty()) {
     return visualBuffer.c_str();
@@ -1102,6 +1102,31 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
   int w = 0, h = 0;
   fontIt->second.getTextDimensions(textCursor, &w, &h, style);
   return w;
+}
+
+size_t GfxRenderer::getTextOverflowPrefix(int fontId, const char* text, size_t length, int widthLimit,
+                                          int8_t characterSpacing) const {
+  if (!length || !text) return 0;
+  // Reordering can change earlier glyphs when a prefix ends, and tracking uses
+  // advance widths rather than cumulative ink bounds. Keep their exact measurements.
+  if (widthLimit < 0 || characterSpacing != 0 || isSdCardFont(fontId) || mayNeedBidi(text)) {
+    return getTextWidth(fontId, text, EpdFontFamily::REGULAR, BidiUtils::BidiBaseDir::AUTO, characterSpacing) >
+                   widthLimit
+               ? length
+               : 0;
+  }
+#if CROSSINK_SCALABLE_FONTS
+  ScalableFontAccess access;
+#endif
+  const auto font = fontMap.find(fontId);
+  if (font == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", fontId);
+    return 0;
+  }
+  int width, height;
+  const char* end =
+      font->second.getTextDimensions(text, &width, &height, EpdFontFamily::REGULAR, nullptr, nullptr, widthLimit);
+  return end ? static_cast<size_t>(end - text) : 0;
 }
 
 bool GfxRenderer::getLatinBodyBounds(int fontId, TextVerticalBounds& body, TextVerticalBounds& extent) const {
@@ -1363,17 +1388,13 @@ void GfxRenderer::drawLine(int x1, int y1, int x2, int y2, const bool state) con
     if (y2 < y1) std::swap(y1, y2);
     y1 = std::max(y1, 0);
     y2 = std::min(y2, sh - 1);
-    for (int y = y1; y <= y2; y++) {
-      drawPixel(x1, y, state);
-    }
+    if (y1 <= y2) fillRect(x1, y1, 1, y2 - y1 + 1, state);
   } else if (y1 == y2) {
     if (y1 < 0 || y1 >= sh) return;
     if (x2 < x1) std::swap(x1, x2);
     x1 = std::max(x1, 0);
     x2 = std::min(x2, sw - 1);
-    for (int x = x1; x <= x2; x++) {
-      drawPixel(x, y1, state);
-    }
+    if (x1 <= x2) fillRect(x1, y1, x2 - x1 + 1, 1, state);
   } else {
     // Bresenham's line algorithm — integer arithmetic only
     int dx = x2 - x1;
@@ -2000,6 +2021,24 @@ void GfxRenderer::drawLegacyIcon(const uint8_t bitmap[], const int x, const int 
   }
 }
 
+// Native-size covers and wallpapers share the glyph rasterizer's clipped
+// packed-pixel walk. BMP levels run from black (0) through white (3).
+void GfxRenderer::drawBitmapRow(const uint8_t* row, const int first, const int end, const int x, const int y,
+                                const bool monochromeMask) const {
+  glyphBitmap::Clip clip{first, 0, end, 1};
+  const auto target = packedBitmapTarget({x, y, 1, 0, 0, 1}, clip);
+  uint8_t levels = 0x07, clearLevels = 0x07;
+  if (!monochromeMask && renderMode != BW) {
+    levels = clearLevels = 0;
+    for (uint8_t shade = 0; shade < 4; ++shade) {
+      const auto pixel = grayPlanePixel(shade, renderMode == GRAYSCALE_MSB, absoluteGrayPlanes);
+      if (pixel.write) levels |= 1u << shade;
+      if (pixel.black) clearLevels |= 1u << shade;
+    }
+  }
+  glyphBitmap::drawLevels(row, end, 1, true, levels, clearLevels, target, clip);
+}
+
 bool GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, const int maxWidth, const int maxHeight,
                              const float cropX, const float cropY, const bool monochromeMask) const {
   if (fontCacheManager_ && fontCacheManager_->isScanning()) return false;
@@ -2069,12 +2108,12 @@ bool GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
       continue;
     }
 
+    if (!isScaled) {
+      drawBitmapRow(outputRow, cropPixX, bitmap.getWidth() - cropPixX, x - cropPixX, screenY, monochromeMask);
+      continue;
+    }
     for (int bmpX = cropPixX; bmpX < bitmap.getWidth() - cropPixX; bmpX++) {
-      int screenX = bmpX - cropPixX;
-      if (isScaled) {
-        screenX = std::floor(screenX * scale);
-      }
-      screenX += x;  // the offset should not be scaled
+      const int screenX = x + static_cast<int>(std::floor((bmpX - cropPixX) * scale));
       if (screenX >= getScreenWidth()) {
         break;
       }
@@ -2144,8 +2183,12 @@ bool GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y,
       continue;
     }
 
+    if (!isScaled) {
+      drawBitmapRow(outputRow, 0, bitmap.getWidth(), x, screenY, true);
+      continue;
+    }
     for (int bmpX = 0; bmpX < bitmap.getWidth(); bmpX++) {
-      int screenX = x + (isScaled ? static_cast<int>(std::floor(bmpX * scale)) : bmpX);
+      const int screenX = x + static_cast<int>(std::floor(bmpX * scale));
       if (screenX >= getScreenWidth()) {
         break;
       }

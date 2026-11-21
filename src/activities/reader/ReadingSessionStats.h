@@ -56,9 +56,11 @@ void commitReadingSession(BookReadingStats& book, GlobalReadingStats& global, ui
 // includes the pending session, so replacing live stats would count it twice.
 void importBookStatsEdits(BookReadingStats& live, const BookReadingStats& disk);
 
+void importGlobalCompletionEdits(GlobalReadingStats& live, const GlobalReadingStats& disk);
+
 // Refreshes a reader's global stats after an overlay closes. Takes the disk
-// copy only after a local reset; otherwise imports the completed-books count
-// the stats screen can edit and keeps unsaved live counters.
+// copy only after a local reset; otherwise imports completion and classification edits
+// and keeps unsaved live counters.
 void refreshGlobalStatsAfterOverlay(GlobalReadingStats& live, uint32_t resetRevisionAtOpen);
 
 // Persist a preview that includes the live session without consuming it. Safe

@@ -102,10 +102,11 @@ Version 5 adds signed `characterSpacing` (-5..5) after the source file size in t
 
 ## TXT `progress.bin`
 
-Each TXT cache stores a six-byte progress record: a little-endian `u16` page
-number followed by a little-endian `u32` source-file byte offset. The format is
-unchanged. A save during font reindexing writes `0xFFFFFFFF` for an unknown
-offset, retaining the page number and compatibility with older readers.
+Each TXT cache stores a six-byte progress record containing a little-endian
+`u16` page number followed by a little-endian `u32` source-file byte offset.
+The reader saves the last page it displayed, including during a font reindex.
+It syncs and closes `progress.bin.tmp` before replacing the primary file and
+recovers `progress.bin.bak` if power is lost during replacement.
 
 Reopening prefers an in-range offset to preserve text position when the status
 bar geometry changed while the book was closed. Offset zero is valid only for
@@ -500,7 +501,9 @@ struct PayloadHeader {           // 32 bytes, then the four strings back to back
 ### Version 10
 
 `book.bin` stores EPUB metadata plus lookup tables for spine and TOC entries.
-The current firmware writes this version from `BookMetadataCache`.
+The current firmware writes this version from `BookMetadataCache`. It syncs and closes
+`book.bin.tmp` before publication. If replacement is interrupted, the next open
+restores the previous complete index from `book.bin.bak` when present.
 Version 10 rebuilds metadata with namespace-aware OPF parsing so optimizer-generated
 XML prefixes do not leave an empty chapter list. The binary layout is unchanged.
 Version 9 stores book and TOC title strings NFC-composed so decomposed
@@ -982,7 +985,7 @@ identity used by stats uploads: `crossink-` followed by the twelve lowercase hex
 MAC digits. Only the current reader's paths are read, updated, reset, or uploaded:
 
 - `/.crosspoint/global_stats_<reader>.bin` (and `.bak`/`.tmp`).
-- Per-book `stats_v7_<reader>.bin`, older versioned variants, and
+- Per-book `stats_v8_<reader>.bin`, older versioned variants, and
   `stats_<reader>.bin` inside the book cache directory.
 - `/.crosspoint/daily_reading_<reader>/` for daily counters.
 - `/.crosspoint/reading_sessions_<reader>/` for the session outbox.
@@ -1016,20 +1019,55 @@ require an updated Sync server.
 
 ## Reading-stat save slots
 
-Local `global_stats.bin` (version 4) and per-book `stats_v7.bin` use the same alternating
-primary/`.bak` policy. Their payloads are 175 and 91 bytes,
-respectively; each slot appends a 4-byte sequence and a 4-byte IEEE CRC-32 of
-the payload plus sequence. Thus stored records are 183 and 99 bytes. Readers
-validate the entire record before choosing its sequence. The first migration
-preserves the legacy primary. Previous per-book versions and recoverable
-legacy `.tmp` files are still accepted by the migration loader.
+Local `global_stats.bin` (version 5) and per-book `stats_v8.bin` use alternating
+primary and backup slots. Their payloads are 184 and 107 bytes, respectively.
+Each slot appends a four-byte sequence and a four-byte IEEE CRC-32 of the
+payload plus sequence. Readers validate the entire record before choosing its
+sequence. Migration accepts previous formats and recoverable legacy temporary
+files. The first local global or per-book slot is synced to a `.new` file and
+then renamed into place so a partial write cannot hide an older history. Include both slots
+in raw SD backups.
 
-Nearby sharing and stats backups export the payload without the slot trailer.
-Updated readers can read older global payloads, including version 3; older readers
-cannot read the new version 4 payload. Both local slots must be included
-in raw SD backups. Reset deletes
-older per-book fallback files before deleting the newest slot. Global reset
-writes an empty newest snapshot through the same interruption-safe save path.
+Nearby sharing advertises the highest supported stats version in byte 7 of
+the CISS header. Updated peers exchange the full v5 payload. For an older
+peer, the sender uses the version of its received snapshot, or v3 for an
+original HELLO packet with no version advertisement. Legacy snapshots combine
+book and article completions in their original count.
+Device backup files include the slot trailer. Global reset writes an empty
+snapshot with a new counter ID.
+
+### Article classification
+
+Global version 5 appends the completed-article count at bytes 175–178 (uint32
+LE) and the remaining number of unattributed legacy book completions at bytes
+179–182 (uint32 LE). Byte 183 bit 0 records whether this reader has marked an
+article since its last global reset. An unfinished article sets this bit too.
+Changing it back to a book keeps the bit set. A nonzero article count also
+indicates article history in snapshots where the bit is clear. Nearby totals
+show articles if any included reader has article history. Bytes 13–16 count
+completed books. Both types contribute to time, sessions, pages, daily totals,
+and streaks.
+
+A short-lived, device-qualified `.article` journal pairs the global update with
+the title's category change. It records both counter identities, the category,
+the previous article-history flag, and the completion counts before and after
+the change. On restart, the saved title determines which state to keep.
+
+Per-title version 8 adds three flags in byte 16. Bit 2 marks an article, bit 3
+indicates a tracked completion, and bit 4 marks a legacy finish awaiting
+attribution. Bytes 91–106 identify the global counter that received that
+completion. Reclassifying a finished title transfers its count if
+it belongs to the active history. Resetting per-title stats keeps the type.
+Old per-title snapshots default to books. Older firmware recorded finished
+status without a corresponding global counter ID or tracking flag, so a
+migrated history assigns its original book count to those titles as they are
+reclassified or marked unfinished. Once those credits run out, other legacy
+finishes cannot consume completions recorded after the upgrade.
+
+Stats uploads keep `completed` as the combined number of finished titles. The
+global payload also sends `completed_books`, `completed_articles`, and
+`has_articles`. Each per-title item includes `is_article`. Each reader retains
+its own classification for the title.
 
 ### Counter identities
 
@@ -1065,6 +1103,28 @@ in total. Upload buffers remain fixed at 1536 bytes, with a 33-byte stack buffer
 for hex serialization and no new device heap allocation for identities.
 The optional nearby-sharing activity also grows by 144 bytes (eight queued
 snapshots and its local export); its existing activity allocation gate is unchanged.
+
+### Interrupted article classification
+
+Changing the type of a finished title can move a completion between two files.
+Before moving that credit the reader publishes `global_stats_<reader>.bin.article`
+using the existing temporary-file, rename, and CRC32 writer. Version 1 stores the
+16-byte global and title counter IDs, the before and after counts (three little-endian
+`u32` values each for books, articles and unresolved legacy books), the desired
+article flag, and a length-prefixed EPUB cache path of up to 64 bytes. It writes
+the device counters first and the title last, then removes the intent.
+
+On startup the saved title category selects the matching counts. Recovery checks
+both counter IDs and verifies that the recorded counts match the old or new
+snapshot before changing them. Repeated recovery is safe and leaves unrelated
+reading time and sessions intact. An unpublished `.article.tmp` precedes both
+writes and can be discarded. An unreadable or conflicting published intent
+protects the saved history from further global updates. Explicit backup recovery
+archives it with the original slots.
+
+## `stats_v8.bin`
+
+The 107-byte payload extends version 7 with the classification and completion credit described above.
 
 ## `stats_v7.bin`
 
@@ -1930,8 +1990,9 @@ buffer plus small serialized chunks, with no new heap allocation or retained
 history buffer. The sync payload and server API are unchanged.
 
 After successful daily stats sync, the reader removes fully acknowledged months
-older than the previous calendar month. Current, previous, and future months stay,
-as does any month with unuploaded seconds. Cleanup requires a valid local date,
+older than the previous calendar month. X4 Pro retains the current and six preceding
+months for its rolling six-month heatmap. All readers keep future months and any
+month with unuploaded seconds. Cleanup requires a valid local date,
 flushes accepted in-memory time first, and validates every existing snapshot;
 corrupt, unknown, or unreadable data is retained. The newest acknowledgments must
 cover every total in either snapshot. Older snapshots are deleted first so an
@@ -2228,8 +2289,8 @@ Older firmware does not understand version 2 and falls back to its defaults.
 
 New files in `/.crossink-stats-backup/` use the global-stats payload followed by
 the existing alternating-slot trailer: little-endian `u32` sequence and IEEE
-CRC-32 of payload plus sequence. The current payload is 175 bytes (version 4),
-so a checked snapshot is 183 bytes. `<name>.bin` and `<name>.bin.bak` retain
+CRC-32 of payload plus sequence. The current payload is 184 bytes (version 5),
+so a checked snapshot is 192 bytes. `<name>.bin` and `<name>.bin.bak` retain
 alternating snapshots. Keep both when copying a backup. Existing raw version
 1–4 snapshots remain readable for explicit recovery. No EPUB cache change is
 required.

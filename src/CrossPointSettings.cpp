@@ -1,5 +1,6 @@
 #include "CrossPointSettings.h"
 
+#include <AppCapabilities.h>
 #include <BoardConfig.h>
 #include <CrossInkHalFrontlight.h>
 #include <HalClock.h>
@@ -471,6 +472,10 @@ uint16_t CrossPointSettings::readingIdleTimeThresholdSecondsForUnits(const uint8
   return static_cast<uint16_t>(clampedUnits) * READING_IDLE_TIME_THRESHOLD_UNIT_SECONDS;
 }
 
+bool CrossPointSettings::shouldShowReadingHeatmap() const {
+  return CROSSINK_APP_READING_HEATMAP && shouldTrackReadingStats() && showReadingHeatmap != 0;
+}
+
 uint16_t CrossPointSettings::getReadingIdleTimeThresholdSeconds() const {
   return readingIdleTimeThresholdSecondsForUnits(readingIdleTimeThresholdUnits);
 }
@@ -559,6 +564,8 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
   std::lock_guard<std::mutex> lock(_mutex);
   // Old settings files must not retain a previously selected runtime override.
   wifiTransmitPower = 0;
+  showReadingHeatmap = 1;
+  readingStatsCategoryLabel = DEFAULT_READING_STATS_CATEGORY_LABEL;
   bool needsResave = false;
   auto clamp = [](const uint8_t value, const uint8_t maxValue, const uint8_t fallback) {
     return value < maxValue ? value : fallback;

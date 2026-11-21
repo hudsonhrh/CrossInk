@@ -21,10 +21,13 @@ using namespace OptimizerFormat;
 struct Output : Print {
   std::vector<uint8_t> bytes;
   size_t limit = 1000000;
-  size_t write(uint8_t b) override {
-    if (bytes.size() == limit) return 0;
-    bytes.push_back(b);
-    return 1;
+  size_t writes = 0;
+  size_t write(uint8_t b) override { return write(&b, 1); }
+  size_t write(const uint8_t* data, size_t size) override {
+    ++writes;
+    const size_t accepted = std::min(size, limit - bytes.size());
+    bytes.insert(bytes.end(), data, data + accepted);
+    return accepted;
   }
 };
 std::vector<uint8_t> load(const char* name) {
@@ -209,12 +212,28 @@ int main() {
     CHECK(codecs == (std::set<uint8_t>{0, 1, 2}));
   }
 
+  {
+    // The golden payload is also 32 rows of 131 bytes. Its 2 KiB block
+    // boundaries now bisect scanlines, including the packed row-end padding.
+    auto data = load("raw.pxc2");
+    auto expected = raw;
+    put16(data.data() + 8, 521);
+    put16(data.data() + 10, 32);
+    put16(data.data() + 12, 131);
+    put16(expected.data(), 521);
+    put16(expected.data() + 2, 32);
+    Output output;
+    CHECK(decode(data, record(data), output, 521, 32));
+    CHECK(output.bytes == expected);
+  }
+
   for (auto name : {"raw.pxc2", "deflate.pxc2", "packbits.pxc2", "mixed.pxc2", "browser.pxc2"}) {
     auto data = load(name);
     const auto r = record(data);
     Output output;
     CHECK(decode(data, r, output));
     CHECK(output.bytes == raw);
+    CHECK(output.writes == 1U + u16(data.data() + 16));  // Cache header plus one write per decoded block.
     for (auto size : {std::pair<int, int>{63, 67}, {254, 262}, {1, 1}}) {
       Output resized;
       CHECK(decode(data, r, resized, size.first, size.second));

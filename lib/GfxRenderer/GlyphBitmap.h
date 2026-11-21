@@ -82,6 +82,11 @@ __attribute__((always_inline)) inline void paint(uint8_t* buffer, int destinatio
     buffer[destination >> 3] |= mask;
 }
 
+// Paint packed pixels selected by shade. A bit in clearLevels clears the
+// destination; otherwise the pixel is set. BMP rows and glyphs share this loop.
+inline void drawLevels(const uint8_t* bitmap, int width, int height, bool twoBit, uint8_t levels, uint8_t clearLevels,
+                       const Target& target, Clip clip);
+
 // Paint a packed glyph into target.
 //
 // bitmap: rows are contiguous, MSB first, 1 or 2 bits per pixel; widths need
@@ -126,6 +131,11 @@ inline void draw(const uint8_t* bitmap, int width, int height, bool twoBit, Plan
     }
   }
 
+  drawLevels(bitmap, width, height, twoBit, levels, clearLevels, target, clip);
+}
+
+inline void drawLevels(const uint8_t* bitmap, int width, int height, bool twoBit, uint8_t levels, uint8_t clearLevels,
+                       const Target& target, Clip clip) {
   // Intersect with the glyph bounds, then with the panel width and the
   // buffered row band.
   clip.left = std::max(clip.left, 0);

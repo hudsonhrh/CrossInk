@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <new>
+#include <limits>
 
 // ============================================================================
 // IMAGE PROCESSING OPTIONS
@@ -17,14 +17,6 @@
 // For cover images, dithering is done in JpegToBmpConverter.cpp instead.
 constexpr bool USE_ATKINSON = true;  // Use Atkinson dithering instead of Floyd-Steinberg
 // ============================================================================
-
-Bitmap::~Bitmap() {
-  delete[] errorCurRow;
-  delete[] errorNextRow;
-
-  delete atkinsonDitherer;
-  delete fsDitherer;
-}
 
 uint16_t Bitmap::readLE16(HalFile& f) {
   const int c0 = f.read();
@@ -91,6 +83,13 @@ BmpReaderError Bitmap::parseHeaders() {
   if (!file) return BmpReaderError::FileInvalid;
   if (!file.seek(0)) return BmpReaderError::SeekStartFailed;
 
+  // Parsing again starts an independent decode at the original size.
+  atkinsonDitherer.reset();
+  fsDitherer.reset();
+  resampleSums.reset();
+  sourceRowsRead = outputRowsRead = 0;
+  needSequentialSeek = false;
+
   // --- BMP FILE HEADER ---
   const uint16_t bfType = readLE16(file);
   if (bfType != 0x4D42) return BmpReaderError::NotBMP;
@@ -104,6 +103,7 @@ BmpReaderError Bitmap::parseHeaders() {
 
   width = static_cast<int32_t>(readLE32(file));
   const auto rawHeight = static_cast<int32_t>(readLE32(file));
+  if (rawHeight == std::numeric_limits<int32_t>::min()) return BmpReaderError::BadDimensions;
   topDown = rawHeight < 0;
   height = topDown ? -rawHeight : rawHeight;
 
@@ -189,21 +189,26 @@ BmpReaderError Bitmap::parseHeaders() {
   const bool convertSourceLevels = toneProfile == ImageToneProfile::PiccoCover && bpp > 1;
   if (dithering && (!nativePalette || convertSourceLevels)) {
     if (USE_ATKINSON) {
-      atkinsonDitherer = new (std::nothrow) AtkinsonDitherer(width, toneProfile);
+      atkinsonDitherer = makeUniqueNoThrow<AtkinsonDitherer>(width, toneProfile);
       if (!atkinsonDitherer || !atkinsonDitherer->isValid()) {
-        delete atkinsonDitherer;
-        atkinsonDitherer = nullptr;
+        LOG_ERR("BMP", "Failed to allocate Atkinson ditherer");
+        atkinsonDitherer.reset();
         return BmpReaderError::OomRowBuffer;
       }
     } else {
-      fsDitherer = new (std::nothrow) FloydSteinbergDitherer(width, toneProfile);
+      fsDitherer = makeUniqueNoThrow<FloydSteinbergDitherer>(width, toneProfile);
       if (!fsDitherer || !fsDitherer->isValid()) {
-        delete fsDitherer;
-        fsDitherer = nullptr;
+        fsDitherer.reset();
         LOG_ERR("BMP", "Failed to allocate Floyd-Steinberg ditherer");
         return BmpReaderError::OomRowBuffer;
       }
     }
+  }
+
+  // Firmware-generated four-tone covers already contain the packed levels readNextRow emits.
+  packedNative2Bit = bpp == 2 && !atkinsonDitherer && !fsDitherer;
+  for (int i = 0; packedNative2Bit && i < 4; ++i) {
+    packedNative2Bit = (adjustPixel(paletteLum[i]) >> 6) == i;
   }
 
   return BmpReaderError::Ok;
@@ -227,8 +232,17 @@ bool Bitmap::setDitheredOutputSize(const int targetWidth, const int targetHeight
     return false;
   }
 
-  delete atkinsonDitherer;
-  atkinsonDitherer = resizedDitherer.release();
+  if (sourceRowsRead && outputRowsRead < targetHeight) {
+    // A new target grid invalidates any partial row carried by the old one.
+    const int firstRow = outputRowsRead * height / targetHeight;
+    if (!file.seek(bfOffBits + static_cast<uint32_t>(firstRow) * rowBytes)) {
+      LOG_ERR("BMP", "Failed to seek resized output row %d", outputRowsRead);
+      return false;
+    }
+    sourceRowsRead = firstRow;
+  }
+
+  atkinsonDitherer = std::move(resizedDitherer);
   resampleSums = std::move(sums);
   outputWidth = targetWidth;
   outputHeight = targetHeight;
@@ -262,44 +276,55 @@ uint8_t Bitmap::pixelLuminance(const uint8_t* row, const int x) const {
   }
 }
 
-BmpReaderError Bitmap::readAveragedRow(uint8_t* rowBuffer) const {
-  std::fill_n(resampleSums.get(), outputWidth, 0U);
-  // Integer overlap weights preserve fractional source pixels without floating
-  // point. Each output footprint has area width * height in this coordinate grid.
+BmpReaderError Bitmap::readAveragedRow(uint8_t* data, uint8_t* rowBuffer) const {
+  // In this integer grid each source pixel spans outputWidth x outputHeight
+  // units and each output footprint spans width x height units.
+  const uint32_t area = static_cast<uint32_t>(width) * height;
   const int top = outputRowsRead * height;
   const int bottom = top + height;
-  const int firstRow = top / outputHeight;
-  const int endRow = (bottom + outputHeight - 1) / outputHeight;
-  if (sourceRowsRead != firstRow) {
-    // Fractional footprints can share a source row. Re-read it rather than
-    // retaining another row buffer or relying on the caller's scratch contents.
-    if (!file.seek(bfOffBits + static_cast<uint32_t>(firstRow) * rowBytes)) {
-      LOG_ERR("BMP", "Failed to seek resampling row %d", firstRow);
-      return BmpReaderError::SeekPixelDataFailed;
-    }
-    sourceRowsRead = firstRow;
-  }
-  for (int y = firstRow; y < endRow; ++y) {
+  while (sourceRowsRead * outputHeight < bottom) {
     if (file.read(rowBuffer, rowBytes) != rowBytes) {
-      LOG_ERR("BMP", "Incomplete resampling row %d", y);
+      LOG_ERR("BMP", "Incomplete resampling row %d", sourceRowsRead);
+      // Keep already accumulated rows and let a retry start this row afresh.
+      needSequentialSeek = true;
       return BmpReaderError::ShortReadRow;
     }
     ++sourceRowsRead;
-    const int yWeight = std::min(bottom, (y + 1) * outputHeight) - std::max(top, y * outputHeight);
-    for (int x = 0; x < outputWidth; ++x) {
-      const int left = x * width;
-      const int right = left + width;
-      const int firstColumn = left / outputWidth;
-      const int endColumn = (right + outputWidth - 1) / outputWidth;
-      uint32_t rowSum = 0;
-      for (int sx = firstColumn; sx < endColumn; ++sx) {
-        const int xWeight = std::min(right, (sx + 1) * outputWidth) - std::max(left, sx * outputWidth);
-        rowSum += static_cast<uint32_t>(pixelLuminance(rowBuffer, sx)) * xWeight;
+    const int rowEnd = sourceRowsRead * outputHeight;
+    const int carryY = std::max(0, rowEnd - bottom);
+    const int weightY = std::min(rowEnd, bottom) - std::max(rowEnd - outputHeight, top);
+    int x = 0;
+    int remainingX = width;
+    uint32_t rowSum = 0;
+    for (int sx = 0; sx < width; ++sx) {
+      const uint8_t lum = pixelLuminance(rowBuffer, sx);
+      if (outputWidth < remainingX) {
+        rowSum += lum * outputWidth;
+        remainingX -= outputWidth;
+        continue;
       }
-      // Max sum is 255 * 2048 * 3072, within uint32_t under parseHeaders limits.
-      resampleSums[x] += rowSum * yWeight;
+      // A downsampled source pixel can intersect at most two output columns.
+      rowSum += lum * remainingX;
+      const uint32_t sum = resampleSums[x] + rowSum * weightY;
+      if (rowEnd >= bottom) {
+        const auto gray = static_cast<uint8_t>((sum + area / 2) / area);
+        const uint8_t level = atkinsonDitherer->processPixel(adjustPixel(gray), x);
+        if ((x & 3) == 0) data[x / 4] = 0;
+        data[x / 4] |= level << (6 - 2 * (x & 3));
+        // Carry the shared source row's remaining contribution into the next
+        // output. Its raw pixels and the caller's buffers can now be discarded.
+        resampleSums[x] = rowSum * carryY;
+      } else {
+        resampleSums[x] = sum;
+      }
+      const int carryX = outputWidth - remainingX;
+      rowSum = lum * carryX;
+      remainingX = width - carryX;
+      ++x;
     }
   }
+  atkinsonDitherer->nextRow();
+  ++outputRowsRead;
   return BmpReaderError::Ok;
 }
 
@@ -307,13 +332,26 @@ BmpReaderError Bitmap::readAveragedRow(uint8_t* rowBuffer) const {
 BmpReaderError Bitmap::readNextRow(uint8_t* data, uint8_t* rowBuffer) const {
   // Note: rowBuffer should be pre-allocated by the caller to size 'rowBytes'
   if (outputRowsRead >= outputHeight) return BmpReaderError::ShortReadRow;
+  if (needSequentialSeek) {
+    if (!file.seek(bfOffBits + static_cast<uint32_t>(sourceRowsRead) * rowBytes)) {
+      return BmpReaderError::SeekPixelDataFailed;
+    }
+    needSequentialSeek = false;
+  }
+  if (resampleSums) return readAveragedRow(data, rowBuffer);
+  if (file.read(rowBuffer, rowBytes) != rowBytes) {
+    needSequentialSeek = true;
+    return BmpReaderError::ShortReadRow;
+  }
+  ++sourceRowsRead;
 
-  if (resampleSums) {
-    const auto result = readAveragedRow(rowBuffer);
-    if (result != BmpReaderError::Ok) return result;
-  } else {
-    if (file.read(rowBuffer, rowBytes) != rowBytes) return BmpReaderError::ShortReadRow;
-    ++sourceRowsRead;
+  if (packedNative2Bit) {
+    const int bytes = (width + 3) / 4;
+    memcpy(data, rowBuffer, bytes);
+    // BMP padding can contain arbitrary bits; output padding is always zero.
+    if (width & 3) data[bytes - 1] &= static_cast<uint8_t>(0xFF << (2 * (4 - (width & 3))));
+    ++outputRowsRead;
+    return BmpReaderError::Ok;
   }
 
   if (bpp == 1 && outputWidth == width) {
@@ -367,10 +405,7 @@ BmpReaderError Bitmap::readNextRow(uint8_t* data, uint8_t* rowBuffer) const {
   };
 
   for (int outputX = 0; outputX < outputWidth; outputX++) {
-    const uint32_t area = static_cast<uint32_t>(width) * height;
-    const uint8_t lum = resampleSums ? static_cast<uint8_t>((resampleSums[outputX] + area / 2) / area)
-                                     : pixelLuminance(rowBuffer, outputX);
-    packPixel(lum, outputX);
+    packPixel(pixelLuminance(rowBuffer, outputX), outputX);
   }
 
   if (atkinsonDitherer)
@@ -388,6 +423,7 @@ BmpReaderError Bitmap::readNextRow(uint8_t* data, uint8_t* rowBuffer) const {
 
 BmpReaderError Bitmap::readRowGray(const int y, uint8_t* gray, uint8_t* rowBuffer) const {
   if (y < 0 || y >= height) return BmpReaderError::BadDimensions;
+  needSequentialSeek = true;
   const uint32_t fileRow = topDown ? y : height - 1 - y;
   if (!file.seek(bfOffBits + fileRow * rowBytes)) return BmpReaderError::SeekPixelDataFailed;
   if (file.read(rowBuffer, rowBytes) != rowBytes) return BmpReaderError::ShortReadRow;
@@ -400,7 +436,9 @@ BmpReaderError Bitmap::rewindToData() const {
     return BmpReaderError::SeekPixelDataFailed;
   }
 
+  needSequentialSeek = false;
   // Reset dithering when rewinding
+  if (resampleSums) std::fill_n(resampleSums.get(), outputWidth, 0U);
   if (fsDitherer) fsDitherer->reset();
   if (atkinsonDitherer) atkinsonDitherer->reset();
   sourceRowsRead = 0;

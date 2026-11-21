@@ -412,3 +412,136 @@ TEST(BitmapResample, MonochromeExpansionPreservesPalettePixelsAndPadding) {
     }
   }
 }
+
+TEST(BitmapResample, FractionalDownsamplingReadsEachSourceRowOnceAndMatchesAreaAverage) {
+  for (const bool topDown : {true, false}) {
+    constexpr int width = 17, height = 11;
+    const int stride = (width * 3 + 3) & ~3;
+    const auto bytes = create24BitBmp(width, height, topDown);
+    for (int outWidth = 1; outWidth <= width; ++outWidth) {
+      for (int outHeight = 1; outHeight <= height; ++outHeight) {
+        if (outWidth == width && outHeight == height) continue;
+        HalFile file(bytes);
+        Bitmap bitmap(file, true, ImageToneProfile::Even);
+        ASSERT_EQ(bitmap.parseHeaders(), BmpReaderError::Ok);
+        ASSERT_TRUE(bitmap.setDitheredOutputSize(outWidth, outHeight));
+        const auto before = file.bytesRead();
+        AtkinsonDitherer dither(outWidth, ImageToneProfile::Even);
+        std::vector<uint8_t> row((outWidth + 3) / 4), scratch(stride);
+        for (int y = 0; y < outHeight; ++y) {
+          std::fill(scratch.begin(), scratch.end(), 99);
+          std::fill(row.begin(), row.end(), 0xff);
+          ASSERT_EQ(bitmap.readNextRow(row.data(), scratch.data()), BmpReaderError::Ok);
+          std::vector<uint8_t> expected(row.size(), 0);
+          for (int x = 0; x < outWidth; ++x) {
+            int sum = 0;
+            for (int sy = 0; sy < height; ++sy) {
+              const int dy = std::min((y + 1) * height, (sy + 1) * outHeight) - std::max(y * height, sy * outHeight);
+              if (dy <= 0) continue;
+              for (int sx = 0; sx < width; ++sx) {
+                const int dx = std::min((x + 1) * width, (sx + 1) * outWidth) - std::max(x * width, sx * outWidth);
+                if (dx > 0) sum += bytes[54 + sy * stride + 3 * sx] * dx * dy;
+              }
+            }
+            const int lum = (sum + width * height / 2) / (width * height);
+            const auto level = dither.processPixel(adjustPixel(lum), x);
+            expected[x / 4] |= level << (6 - 2 * (x & 3));
+          }
+          dither.nextRow();
+          ASSERT_EQ(row, expected) << outWidth << "x" << outHeight << " row " << y;
+        }
+        EXPECT_EQ(file.bytesRead() - before, static_cast<size_t>(stride * height));
+      }
+    }
+  }
+}
+
+TEST(BitmapResample, PackedFourToneRowsRespectPaletteOrderAndClearPadding) {
+  constexpr int offset = 70;
+  for (const bool reversed : {false, true}) {
+    for (int width = 1; width <= 17; ++width) {
+      const int stride = (width * 2 + 31) / 32 * 4;
+      auto bytes = create24BitBmp(width, 3);
+      bytes.resize(offset + 3 * stride);
+      writeLe32(bytes, 2, bytes.size());
+      writeLe32(bytes, 10, offset);
+      writeLe16(bytes, 28, 2);
+      writeLe32(bytes, 34, 3 * stride);
+      for (int i = 0; i < 4; ++i) std::fill_n(bytes.begin() + 54 + 4 * i, 3, (reversed ? 3 - i : i) * 85);
+      for (int i = 0; i < 3 * stride; ++i) bytes[offset + i] = static_cast<uint8_t>(0xed - 73 * i);
+      HalFile file(bytes);
+      Bitmap bitmap(file, true);
+      ASSERT_EQ(bitmap.parseHeaders(), BmpReaderError::Ok);
+      std::vector<uint8_t> row((width + 3) / 4), scratch(stride);
+      for (int y = 0; y < 3; ++y) {
+        ASSERT_EQ(bitmap.readNextRow(row.data(), scratch.data()), BmpReaderError::Ok);
+        std::vector<uint8_t> expected(row.size(), 0);
+        for (int x = 0; x < width; ++x) {
+          const int shift = 6 - 2 * (x & 3);
+          const int index = (bytes[offset + y * stride + x / 4] >> shift) & 3;
+          expected[x / 4] |= (adjustPixel((reversed ? 3 - index : index) * 85) >> 6) << shift;
+        }
+        EXPECT_EQ(row, expected);
+      }
+    }
+  }
+}
+
+TEST(BitmapResample, ReparsingAfterPartialDownsampleRestartsAtSourceResolution) {
+  auto bytes = create24BitBmp(17, 9);
+  HalFile file(bytes), expectedFile(bytes);
+  Bitmap bitmap(file, true), reference(expectedFile, true);
+  ASSERT_EQ(reference.parseHeaders(), BmpReaderError::Ok);
+  ASSERT_EQ(bitmap.parseHeaders(), BmpReaderError::Ok);
+  ASSERT_TRUE(bitmap.setDitheredOutputSize(5, 4));
+  std::vector<uint8_t> scratch(bitmap.getRowBytes()), actual(5), expected(5);
+  ASSERT_EQ(bitmap.readNextRow(actual.data(), scratch.data()), BmpReaderError::Ok);
+  ASSERT_EQ(bitmap.parseHeaders(), BmpReaderError::Ok);
+  ASSERT_EQ(bitmap.getWidth(), 17);
+  ASSERT_EQ(bitmap.getHeight(), 9);
+  for (int y = 0; y < bitmap.getHeight(); ++y) {
+    ASSERT_EQ(reference.readNextRow(expected.data(), scratch.data()), BmpReaderError::Ok);
+    ASSERT_EQ(bitmap.readNextRow(actual.data(), scratch.data()), BmpReaderError::Ok);
+    EXPECT_EQ(actual, expected);
+  }
+}
+
+TEST(BitmapResample, SequentialDecodeRecoversAfterRandomReadAndPartialSdRow) {
+  auto bytes = create24BitBmp(7, 9);
+  for (bool downsample : {false, true}) {
+    HalFile file(bytes), expectedFile(bytes);
+    Bitmap bitmap(file, true), reference(expectedFile, true);
+    ASSERT_EQ(reference.parseHeaders(), BmpReaderError::Ok);
+    ASSERT_EQ(bitmap.parseHeaders(), BmpReaderError::Ok);
+    if (downsample) {
+      ASSERT_TRUE(reference.setDitheredOutputSize(4, 4));
+      ASSERT_TRUE(bitmap.setDitheredOutputSize(4, 4));
+    }
+    std::vector<uint8_t> scratch(bitmap.getRowBytes()), gray(7);
+    std::vector<uint8_t> actual((bitmap.getWidth() + 3) / 4), expected(actual.size());
+    // For the resampler this interrupts a partially accumulated footprint.
+    file.shortReadOnceAt(54 + 3 * bitmap.getRowBytes());
+    bool sawShortRead = false;
+    for (int y = 0; y < bitmap.getHeight(); ++y) {
+      if (y == 1) ASSERT_EQ(bitmap.readRowGray(0, gray.data(), scratch.data()), BmpReaderError::Ok);
+      auto result = bitmap.readNextRow(actual.data(), scratch.data());
+      if (result == BmpReaderError::ShortReadRow) {
+        EXPECT_FALSE(sawShortRead);
+        sawShortRead = true;
+        result = bitmap.readNextRow(actual.data(), scratch.data());
+      }
+      ASSERT_EQ(result, BmpReaderError::Ok);
+      ASSERT_EQ(reference.readNextRow(expected.data(), scratch.data()), BmpReaderError::Ok);
+      EXPECT_EQ(actual, expected);
+    }
+    EXPECT_TRUE(sawShortRead);
+  }
+}
+
+TEST(BitmapResample, RejectsAnUnrepresentableTopDownHeight) {
+  auto bytes = create24BitBmp(4, 4);
+  writeLe32(bytes, 22, 0x80000000u);
+  HalFile file(bytes);
+  Bitmap bitmap(file);
+  EXPECT_EQ(bitmap.parseHeaders(), BmpReaderError::BadDimensions);
+}

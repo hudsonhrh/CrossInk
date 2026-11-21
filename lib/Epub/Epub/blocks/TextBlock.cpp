@@ -9,12 +9,38 @@
 
 #include <algorithm>
 #include <cstring>
+#include <type_traits>
 
 #include "../../../ScalableFont/ScalableFontSizing.h"
 
 namespace {
 
 constexpr uint16_t MAX_WORDS_PER_TEXT_BLOCK = 512;
+
+// Cache fields are packed individually by serialize(). Fetch adjacent fields
+// under one storage lock, then copy each into its aligned destination.
+template <typename... Fields>
+bool readCacheFields(HalFile& file, Fields&... fields) {
+  uint8_t bytes[(sizeof(Fields) + ...)];
+  static_assert(sizeof(bytes) <= 32);
+  if (file.read(bytes, sizeof(bytes)) != static_cast<int>(sizeof(bytes))) return false;
+
+  const uint8_t* next = bytes;
+  const auto unpack = [&next](auto& value) {
+    using T = std::remove_reference_t<decltype(value)>;
+    if constexpr (std::is_same_v<T, bool>) {
+      static_assert(sizeof(bool) == 1);
+      if (*next > 1) return false;
+      value = *next != 0;
+    } else {
+      static_assert(std::is_integral_v<T> || std::is_enum_v<T>);
+      memcpy(&value, next, sizeof(T));
+    }
+    next += sizeof(T);
+    return true;
+  };
+  return (unpack(fields) && ...);
+}
 
 uint16_t measureBackgroundWidth(const GfxRenderer& renderer, const int fontId, const char* word,
                                 const EpdFontFamily::Style style, const int8_t characterSpacing) {
@@ -626,11 +652,8 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
   uint8_t initialLetterBytes = 0;
   int8_t characterSpacing = 0;
   uint16_t textBytes = 0;
-  if (!serialization::tryReadPod(file, wc) || !serialization::tryReadPod(file, hasFocus) ||
-      !serialization::tryReadPod(file, hasGuideDots) || !serialization::tryReadPod(file, hasWordFlags) ||
-      !serialization::tryReadPod(file, hasWordSpaces) || !serialization::tryReadPod(file, hasWordSizes) ||
-      !serialization::tryReadPod(file, hasSourceRanges) || !serialization::tryReadPod(file, characterSpacing) ||
-      !serialization::tryReadPod(file, initialLetterBytes) || !serialization::tryReadPod(file, textBytes)) {
+  if (!readCacheFields(file, wc, hasFocus, hasGuideDots, hasWordFlags, hasWordSpaces, hasWordSizes, hasSourceRanges,
+                       characterSpacing, initialLetterBytes, textBytes)) {
     LOG_ERR("TXB", "Deserialization failed: could not read block header");
     return nullptr;
   }
@@ -741,35 +764,30 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
   if (rubyCount > 0) block->rubyTexts.resize(wc);
   for (uint16_t i = 0; i < rubyCount; ++i) {
     uint16_t wordIndex = 0;
-    std::string ruby;
-    if (!serialization::tryReadPod(file, wordIndex) || wordIndex >= wc || !serialization::tryReadString(file, ruby)) {
+    uint32_t length = 0;
+    if (!readCacheFields(file, wordIndex, length) || wordIndex >= wc ||
+        !block->rubyTexts[wordIndex].empty() || length == 0 ||
+        length > static_cast<uint32_t>(std::max(0, file.available()))) {
       LOG_ERR("TXB", "Deserialization failed: invalid ruby annotation");
       return nullptr;
     }
-    block->rubyTexts[wordIndex] = std::move(ruby);
+    auto& ruby = block->rubyTexts[wordIndex];
+    ruby.resize(length);
+    if (file.read(ruby.data(), length) != static_cast<int>(length)) {
+      LOG_ERR("TXB", "Deserialization failed: truncated ruby text");
+      return nullptr;
+    }
   }
 
   BlockStyle& blockStyle = block->blockStyle;
-  if (!serialization::tryReadPod(file, blockStyle.alignment) ||
-      !serialization::tryReadPod(file, blockStyle.textAlignDefined) ||
-      !serialization::tryReadPod(file, blockStyle.marginTop) ||
-      !serialization::tryReadPod(file, blockStyle.marginBottom) ||
-      !serialization::tryReadPod(file, blockStyle.marginLeft) ||
-      !serialization::tryReadPod(file, blockStyle.marginRight) ||
-      !serialization::tryReadPod(file, blockStyle.paddingTop) ||
-      !serialization::tryReadPod(file, blockStyle.paddingBottom) ||
-      !serialization::tryReadPod(file, blockStyle.paddingLeft) ||
-      !serialization::tryReadPod(file, blockStyle.paddingRight) ||
-      !serialization::tryReadPod(file, blockStyle.textIndent) ||
-      !serialization::tryReadPod(file, blockStyle.textIndentDefined) ||
-      !serialization::tryReadPod(file, blockStyle.isRtl) ||
-      !serialization::tryReadPod(file, blockStyle.directionDefined) ||
-      !serialization::tryReadPod(file, blockStyle.fontSize) ||
-      !serialization::tryReadPod(file, blockStyle.lineHeight) ||
-      !serialization::tryReadPod(file, blockStyle.ruledTextOffset) ||
+  if (!readCacheFields(file, blockStyle.alignment, blockStyle.textAlignDefined, blockStyle.marginTop,
+                       blockStyle.marginBottom, blockStyle.marginLeft, blockStyle.marginRight, blockStyle.paddingTop,
+                       blockStyle.paddingBottom, blockStyle.paddingLeft, blockStyle.paddingRight, blockStyle.textIndent,
+                       blockStyle.textIndentDefined, blockStyle.isRtl, blockStyle.directionDefined, blockStyle.fontSize,
+                       blockStyle.lineHeight, blockStyle.ruledTextOffset) || blockStyle.alignment > CssTextAlign::None ||
       (blockStyle.fontSize != 0 &&
        (blockStyle.fontSize < ScalableContentMinPointSize || blockStyle.fontSize > ScalableContentMaxPointSize))) {
-    LOG_ERR("TXB", "Deserialization failed: truncated block style metadata");
+    LOG_ERR("TXB", "Deserialization failed: invalid or incomplete block style metadata");
     return nullptr;
   }
 

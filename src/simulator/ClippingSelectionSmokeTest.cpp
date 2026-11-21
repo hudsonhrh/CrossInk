@@ -8,6 +8,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <optional>
 #include <string_view>
 #include <tuple>
 
@@ -37,7 +40,8 @@ void capture(const char* name) {
   const auto path = std::filesystem::path(directory) / (std::string(name) + ".pgm");
   FILE* output = std::fopen(path.c_str(), "wb");
   require(output, "Cannot create screenshot");
-  RenderLock lock;
+  std::optional<RenderLock> lock;
+  if (!RenderLock::heldByCurrentTask()) lock.emplace();
   const int width = renderer.getScreenWidth(), height = renderer.getScreenHeight();
   std::fprintf(output, "P5\n%d %d\n255\n", width, height);
   for (int y = 0; y < height; ++y)
@@ -297,6 +301,9 @@ void ClippingSelectionSmokeTest::verifyStableHighlightAnchoring(EpubReaderActivi
 }
 
 void ClippingSelectionSmokeTest::verifySavedHighlightSpacing(EpubReaderActivity& reader) {
+  // A pending reader redraw can bind the synthetic word ordinals to the real page.
+  // Keep this clipping private to the fixture until it has been removed.
+  RenderLock lock;
   const auto oldSpacing = SETTINGS.lineHeightPercent;
   const int fontId = SETTINGS.getReaderFontId();
   const int fontHeight = renderer.getLineHeight(fontId);
@@ -312,7 +319,6 @@ void ClippingSelectionSmokeTest::verifySavedHighlightSpacing(EpubReaderActivity&
     for (const bool explicitHeight : {false, true}) {
       size_t erasedPixels = 0;
       {
-        RenderLock lock;
         SETTINGS.lineHeightPercent = spacing;
         const int lineHeight = std::max(1, (fontHeight * spacing + 50) / 100);
         Page page;
@@ -362,6 +368,7 @@ void ClippingSelectionSmokeTest::verifySavedHighlightSpacing(EpubReaderActivity&
   }
   require(CLIPPINGS.removeClippingAt(clippingIndex), "Could not remove highlight test range");
   SETTINGS.lineHeightPercent = oldSpacing;
+  lock.unlock();
   reader.requestUpdate();
 }
 
@@ -740,6 +747,46 @@ bool ClippingSelectionSmokeTest::tick() {
         break;
       }
       require(CLIPPINGS.clippingCount() == initialCount + 2, "Other actions unexpectedly saved a clipping");
+      activityManager.goHome();
+      stage = 80;
+      break;
+    }
+    case 80:
+      require(activityManager.isHomeActivity(), "Could not leave the gesture fixture");
+      SETTINGS.wordSpacing = WordSpacing::fromLevel(-4);
+      SETTINGS.paragraphAlignment = CrossPointSettings::LEFT_ALIGN;
+      activityManager.goToReader("/clipping-spacing.epub", true);
+      break;
+    case 81:
+      if (!reader || !reader->section || !reader->section->pageCount) {
+        --stage;
+        break;
+      }
+      reader->openWordSelect(false);
+      break;
+    case 82: {
+      require(selection, "Could not select the spacing fixture");
+      int last = 0;
+      while (selection->navigator.getWordAt(last + 1)) ++last;
+      selection->navigator.setTouchSelection(0, last);
+      require(selection->captureClippingRequest(), "Could not select the complete spacing passage");
+      selection->finishWithClippingRequest();
+      break;
+    }
+    case 83: {
+      if (!reader) {
+        --stage;
+        break;
+      }
+      std::string text;
+      require(CLIPPINGS.clippingCount() == 1 && CLIPPINGS.readClippingText(0, text), "Missing saved spacing passage");
+      LOG_INF("SMOKE", "Saved spacing passage: %s", text.c_str());
+      require(text == "assumptions about societies work leveraging options master’s tools",
+              "Saved clipping differs from the authored passage");
+      std::ifstream file("fs_/My Clippings.txt");
+      const std::string exported{std::istreambuf_iterator<char>(file), {}};
+      require(exported.find("\n\n" + text + "\n==========\n") != std::string::npos,
+              "Clipping export differs from the authored passage");
       return true;
     }
   }

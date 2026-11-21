@@ -629,9 +629,9 @@ inline SettingInfo buildSideButtonActionSetting(const StrId nameId, uint8_t Cros
 // UI consumers own their descriptors; persistence visits and releases each entry.
 // Counts include conditional publisher-font, touch and slide-switch entries.
 #if CROSSINK_SCALABLE_FONTS
-inline constexpr size_t BASE_SETTINGS_CAPACITY = 113 + (CROSSINK_APP_CAP_TOUCH ? 4 : 0);
+inline constexpr size_t BASE_SETTINGS_CAPACITY = 114 + (CROSSINK_APP_CAP_TOUCH ? 4 : 0);
 #else
-inline constexpr size_t BASE_SETTINGS_CAPACITY = 112 + (CROSSINK_APP_CAP_TOUCH ? 4 : 0);
+inline constexpr size_t BASE_SETTINGS_CAPACITY = 113 + (CROSSINK_APP_CAP_TOUCH ? 4 : 0);
 #endif
 
 #if FREEINK_DEVICE_PICCO
@@ -640,7 +640,9 @@ inline constexpr size_t SLIDE_SWITCH_SETTINGS_COUNT = 1;
 inline constexpr size_t SLIDE_SWITCH_SETTINGS_COUNT = 0;
 #endif
 
-inline size_t getBaseSettingsCapacity() { return BASE_SETTINGS_CAPACITY + 4 + SLIDE_SWITCH_SETTINGS_COUNT; }
+inline size_t getBaseSettingsCapacity() {
+  return BASE_SETTINGS_CAPACITY + 4 + SLIDE_SWITCH_SETTINGS_COUNT + CROSSINK_APP_READING_HEATMAP;
+}
 
 using SettingVisitor = void (*)(SettingInfo&&, void*);
 // Inspect or move each descriptor during the callback; borrowed references expire on return.
@@ -1213,11 +1215,15 @@ inline std::vector<SettingInfo> buildFileBrowserSettingsList(const std::vector<S
 
 inline std::vector<SettingInfo> buildSystemReadingStatsSettingsList(const std::vector<SettingInfo>& allSettings) {
   std::vector<SettingInfo> settings;
-  settings.reserve(3);
+  settings.reserve(4 + CROSSINK_APP_READING_HEATMAP);
   addSettingByName(settings, allSettings, StrId::STR_TRACK_READING_STATS);
   if (!SETTINGS.shouldTrackReadingStats()) return settings;
+#if CROSSINK_APP_READING_HEATMAP
+  addSettingByName(settings, allSettings, StrId::STR_SHOW_READING_HEATMAP);
+#endif
   settings.push_back(SettingInfo::Submenu(StrId::STR_ALL_TIME_STATS, SettingAction::SystemGlobalStats));
   addSettingByName(settings, allSettings, StrId::STR_IDLE_TIME_THRESHOLD);
+  addSettingByName(settings, allSettings, StrId::STR_STATS_CATEGORY_LABEL);
   return settings;
 }
 

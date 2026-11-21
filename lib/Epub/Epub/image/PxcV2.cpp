@@ -1,5 +1,7 @@
 #include "PxcV2.h"
 
+#include <uzlib.h>
+
 #include <algorithm>
 using namespace OptimizerFormat;
 PxcV2::PxcV2(PxcV2Workspace& workspace, Print& output, const Record& r, uint16_t w, uint16_t h)
@@ -54,8 +56,16 @@ bool PxcV2::pixels() {
     }
     if (j != rawLength) return false;
   }
-  if (crc(0, ws.decoded, rawLength) != blockCrc) return false;
-  pixelCrc = crc(pixelCrc, ws.decoded, rawLength);
+  if (uzlib_crc32(ws.decoded, rawLength, 0) != blockCrc) return false;
+  pixelCrc = uzlib_crc32(ws.decoded, rawLength, pixelCrc);
+  rawTotal += rawLength;
+  ++sequence;
+  if (targetW == record.width && targetH == record.height) {
+    // At native size the cache payload is the decoded block stream, including
+    // row-end padding. A block may split a row; the next write continues it.
+    return out.write(ws.decoded, rawLength) == rawLength;
+  }
+
   const uint16_t rowBytes = (record.width + 3) / 4;
   for (size_t i = 0; i < rawLength; ++i) {
     ws.sourceRow[rowUsed++] = ws.decoded[i];
@@ -78,8 +88,6 @@ bool PxcV2::pixels() {
     ++sourceY;
     rowUsed = 0;
   }
-  rawTotal += rawLength;
-  ++sequence;
   return true;
 }
 size_t PxcV2::write(const uint8_t* data, size_t size) {
@@ -120,7 +128,8 @@ size_t PxcV2::write(const uint8_t* data, size_t size) {
   return original;
 }
 bool PxcV2::finish() const {
+  const bool nativeSize = targetW == record.width && targetH == record.height;
   return !failed && state == 1 && !used && fileTotal == record.bytes &&
          rawTotal == uint32_t((record.width + 3) / 4) * record.height && pixelCrc == record.pixelCrc &&
-         sourceY == record.height && targetY == targetH && !rowUsed;
+         (nativeSize || (sourceY == record.height && targetY == targetH && !rowUsed));
 }

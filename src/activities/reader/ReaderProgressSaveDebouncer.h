@@ -49,6 +49,7 @@ class ReaderProgressSaveDebouncer {
            (pendingPageChanges_ >= PAGE_CHANGE_INTERVAL || now - lastPersistedAtMs_ >= MAX_SAVE_INTERVAL_MS);
   }
 
+  bool hasObserved() const { return initialized_; }
   bool hasPending() const { return pending_; }
   uint32_t lastObservedPosition() const { return lastPositionKey_; }
   uint32_t lastObservedMetadata() const { return lastMetadataKey_; }

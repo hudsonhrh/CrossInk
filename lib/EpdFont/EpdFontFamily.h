@@ -1,4 +1,6 @@
 #pragma once
+#include <climits>
+
 #include "EpdFont.h"
 
 class EpdFontFamily {
@@ -43,8 +45,10 @@ class EpdFontFamily {
     return family;
   }
   // Optional ink bounds use font coordinates, increasing upward from the baseline.
-  void getTextDimensions(const char* string, int* w, int* h, Style style = REGULAR, int* inkMinY = nullptr,
-                         int* inkMaxY = nullptr) const;
+  // With a width limit, return the first shaped prefix whose ink already exceeds it.
+  // The measured bounds then cover that prefix. A null return means the whole string fit.
+  const char* getTextDimensions(const char* string, int* w, int* h, Style style = REGULAR, int* inkMinY = nullptr,
+                                int* inkMaxY = nullptr, int widthLimit = INT_MAX) const;
   const EpdFontData* getData(Style style = REGULAR) const;
   GlyphData findGlyphData(uint32_t cp, Style style = REGULAR) const;
   GlyphData getGlyphData(uint32_t cp, Style style = REGULAR) const;

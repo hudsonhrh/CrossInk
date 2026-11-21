@@ -1,0 +1,30 @@
+CrossInk optical ghosting check
+
+Keep the microSD in the reader. Your phone supplies the measurement. The reader can only capture the requested pixels. You can send the original photos back to be scored. Only the sleep check needs the included book.
+
+Phone setup
+Support the reader and phone so neither moves when you press a button. Include all four panel corners. Use steady room light, constant frontlight and the same display settings. Lock focus and exposure. Turn off flash, portrait mode, Night mode and HDR if available. Save full-size originals. JPEG and PNG work with the scorer. On an iPhone use Camera → Formats → Most Compatible for JPEG, or export the originals as JPEG without editing. Avoid glare and white areas clipped to pure white. Keep the same camera settings and distance through both firmware runs.
+
+Ordinary reading, four photos per run
+1. In your own EPUB, choose three neighboring pages with different, reasonably dense text. Call them A, Target and B. Photograph A. Turn forward one page, wait two seconds after the last visible display update and photograph Target.
+2. Turn forward to B and photograph it. Turn back to the same Target, wait two seconds and photograph it again. Hold both preceding pages for the same time before turning. Name the four photos A, After-A, B and After-B.
+3. Note whether either transition used a visible cleaning flash and your page refresh interval. For comparing ordinary turns, keep a run in which neither transition used a cleaning flash. Keep fully refreshed runs separately. Use the same pages, frontlight, font and settings on both firmware versions. Do not refresh, open menus or bring up overlays between a source and its target.
+
+The statues sleep image, four more photos per run
+1. Copy Ghosting check.epub to the reader through USB Drive. In File Browser open the book. Page 1 shows Pattern A. Photograph it, put the reader to sleep from that page, wait two seconds after the final display update and photograph the statues.
+2. Wake the reader. Open page 3, Pattern B, and repeat using the same statues image and the same timing. Both photos must show the identical wallpaper with the same crop, orientation and sleep mode. If wallpaper rotates, wait for matching runs or temporarily select just that image using your usual settings. Check the sleep mode displays the custom wallpaper when sleeping from a book.
+3. Name this set Sleep-A, Statues-after-A, Sleep-B and Statues-after-B. Keep both sets separate. To measure ghosting onto a reading page after an image, use the four book pages in order. Pages 2 and 4 contain identical prose in the area occupied by the checker.
+
+For an old/new measurement, capture the old firmware first and repeat after updating. Ideally take three sets of each route per firmware, alternating the order of the A and B trials. Send original files grouped by firmware and route, plus the filename of the sleep artwork if available. A short fixed-camera video can also supply the four frames. Keep the full-resolution original and indicate the kind of turn (ordinary or cleaning). A video from button release through settling also measures page-turn speed.
+
+How to score on a computer (optional)
+The scorer requires Python 3, NumPy and Pillow. From this folder, with those two packages installed, run
+
+  python3 score.py A.jpg After-A.jpg B.jpg After-B.jpg --text --corners "x1,y1 x2,y2 x3,y3 x4,y4"
+
+For reading, enter the four corners of the panel in top-left, top-right, bottom-right, bottom-left order. Add --dark for light text on a dark background. For the checker sleep test omit --text and use the four outer corners of the checker in Sleep-A. Numbers are pixel coordinates in the upright EXIF-corrected original photo. Use an image viewer or editor with a pixel coordinate readout. If the phone moved between complete A and B pairs, use --corners-b with the second set of four points. A camera position change between a pattern and its destination requires recapture. Retain the corners alongside the score for reproducibility. Only inspect the reading area or wallpaper covered by the chosen crop.
+
+Interpreting the result
+The score estimates the remaining imprint as a signed percentage of the photographed black/white contrast. A positive number means a formerly dark mark stayed darker. A negative number means it left a lighter mark. Compare the absolute value, the spread across regions and the scores from repeated independent captures. The unit is camera brightness. It is affected by the camera response, exposure, ambient light, panel temperature and time after the refresh. The sleep check measures sensitivity to the previous pattern in the grid area. A feature baked into the same wallpaper cancels, and a fixed artifact that stays identical in both histories also cancels.
+
+For the sleep check the scorer contrasts the opposite tile diagonals of 20 independent blocks. The signed placebo uses a balanced unrelated assignment of the blocks. Control values near the measured effect, large block-to-block variation, or disagreement across repeats make a small effect inconclusive. The ordinary-text score compares old glyphs in regions showing the target paper color in both photos. Rejection means the scorer could not reliably use that photo set. There is no universal pass threshold. No firmware is installed by this kit, and no settings folders are involved.

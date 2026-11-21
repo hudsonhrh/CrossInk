@@ -50,6 +50,7 @@ class HalFile : public Print {
     cursor_ = position;
     return true;
   }
+  bool seekCur(const int64_t delta) { return seek(cursor_ + delta); }
   bool seekSet(const size_t position) { return seek(position); }
 
   size_t write(const uint8_t value) override { return write(&value, 1); }

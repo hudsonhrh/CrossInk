@@ -33,6 +33,7 @@ class BmpViewerActivity final : public Activity {
   std::string filePath;
   std::vector<std::string> siblingImages;
   int currentImageIndex = -1;
+  bool loadingNoticePending = false;  // Set under RenderLock when navigating to another file.
   // Set when the image must be decoded and drawn again: on entry, after changing
   // images, and after an overlay (top panel, menus, prompts) drew over it. Other
   // update requests (battery, USB) leave the image on screen as is.

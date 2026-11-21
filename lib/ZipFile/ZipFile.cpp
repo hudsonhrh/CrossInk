@@ -760,7 +760,7 @@ int ZipFile::fillUncompressedSizes(const SizeTarget* targets, const size_t targe
 }
 
 int ZipFile::fillEntryIdentities(const EntryTarget* targets, const size_t targetCount, EntryIdentity* identities,
-                                 const size_t identityCount) {
+                                 const size_t identityCount, const bool requireUniqueNames) {
   if (targets == nullptr || identities == nullptr || targetCount == 0) {
     return 0;
   }
@@ -802,6 +802,7 @@ int ZipFile::fillEntryIdentities(const EntryTarget* targets, const size_t target
     while (it != targetEnd && it->hash == hash && it->len == nameLen) {
       if (it->index < identityCount && it->path != nullptr && memcmp(it->path, itemName, nameLen) == 0 &&
           it->path[nameLen] == '\0') {
+        if (requireUniqueNames && identities[it->index].found) return -1;
         identity.found = true;
         identities[it->index] = identity;
         ++matched;
@@ -809,7 +810,7 @@ int ZipFile::fillEntryIdentities(const EntryTarget* targets, const size_t target
       ++it;
     }
 
-    if (matched >= expectedMatches) {
+    if (!requireUniqueNames && matched >= expectedMatches) {
       break;
     }
   }

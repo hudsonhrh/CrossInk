@@ -12,6 +12,7 @@
 #include <limits>
 #include <string>
 
+#include "BookReadingStats.h"
 #include "DailyReadingStats.h"
 #include "TwoSlotFile.h"
 #include "sync/SyncFiles.h"
@@ -50,6 +51,8 @@ struct StatsLoadOutcome {
 //   [61-64]   readingHistoryAnchorDay   uint32_t LE
 //   [65-156]  readingHistoryBits[92]    uint8_t
 //   [157-158] longestReadingStreak      uint16_t LE
+// v4 appends the local counter ID (16 bytes); v5 appends completedArticles (LE u32)
+// followed by the unassigned legacy book completions (LE u32) and article-marked flag (bit 0).
 static constexpr uint8_t GLOBAL_STATS_VERSION = GlobalReadingStats::CURRENT_FILE_VERSION;
 static constexpr uint8_t GLOBAL_STATS_VERSION_V1 = 1;
 static constexpr int GLOBAL_STATS_FILE_SIZE_V1 = 13;
@@ -57,9 +60,12 @@ static constexpr uint8_t GLOBAL_STATS_VERSION_V2 = 2;
 static constexpr int GLOBAL_STATS_FILE_SIZE_V2 = 17;
 static constexpr int GLOBAL_STATS_FILE_SIZE_V3 = 159;
 static constexpr int GLOBAL_STATS_FILE_SIZE = static_cast<int>(GlobalReadingStats::CURRENT_FILE_SIZE);
+static constexpr size_t GLOBAL_STATS_FILE_SIZE_V4 = GlobalReadingStats::V4_FILE_SIZE;
+static_assert(GlobalReadingStats::CURRENT_FILE_SIZE <= two_slot::MAX_PAYLOAD_BYTES);
 static constexpr char GLOBAL_STATS_PATH[] = "/.crosspoint/global_stats.bin";
 static constexpr char SYNCED_STATS_DIR[] = "/.crosspoint/synced_stats";
 static bool s_blockDestructiveSave = false;
+static bool s_articleRecoveryPending = false;
 static uint32_t s_localResetRevision = 0;
 
 // Bind the cached calendar to the selected server/account without storing credentials.
@@ -110,6 +116,8 @@ void addStats(GlobalReadingStats& target, const GlobalReadingStats& source) {
   target.totalReadingSeconds = addSaturated(target.totalReadingSeconds, source.totalReadingSeconds);
   target.totalPagesTurned = addSaturated(target.totalPagesTurned, source.totalPagesTurned);
   target.completedBooks = addSaturated(target.completedBooks, source.completedBooks);
+  target.articleMarked |= source.hasArticles();
+  target.completedArticles = addSaturated(target.completedArticles, source.completedArticles);
   for (size_t i = 0; i < target.timeOfDaySeconds.size(); ++i) {
     target.timeOfDaySeconds[i] = addSaturated(target.timeOfDaySeconds[i], source.timeOfDaySeconds[i]);
   }
@@ -163,49 +171,39 @@ void serializeStats(const GlobalReadingStats& stats, uint8_t* data) {
   data[157] = stats.longestReadingStreak & 0xFF;
   data[158] = (stats.longestReadingStreak >> 8) & 0xFF;
   memcpy(data + GLOBAL_STATS_FILE_SIZE_V3, stats.counterId.bytes.data(), stats.counterId.bytes.size());
+  progress_record::writeU32(data + GLOBAL_STATS_FILE_SIZE_V4, stats.completedArticles);
+  progress_record::writeU32(data + 179, stats.unassignedLegacyBooks);
+  data[183] = stats.hasArticles() ? 1 : 0;
 }
 
-StatsLoadOutcome loadFromOpenFile(FsFile& f, GlobalReadingStats& out) {
-  StatsLoadOutcome outcome;
-  outcome.fileSize = two_slot::payloadLength(f, f.fileSize() == GLOBAL_STATS_FILE_SIZE_V3 + two_slot::TRAILER_BYTES
-                                                    ? GLOBAL_STATS_FILE_SIZE_V3
-                                                    : GLOBAL_STATS_FILE_SIZE);
+size_t slotPayloadSize(uint8_t version) {
+  if (version == 3) return GLOBAL_STATS_FILE_SIZE_V3;
+  if (version == 4) return GLOBAL_STATS_FILE_SIZE_V4;
+  return GLOBAL_STATS_FILE_SIZE;
+}
 
-  uint8_t data[GLOBAL_STATS_FILE_SIZE] = {};
-  const size_t bytesToRead = std::min(outcome.fileSize, static_cast<size_t>(GLOBAL_STATS_FILE_SIZE));
-  const int n = f.read(data, bytesToRead);
-  if (n <= 0 || static_cast<size_t>(n) != bytesToRead) return outcome;
-  outcome.version = data[0];
+StatsLoadResult classifyGlobalPayload(uint8_t version, size_t size) {
+  const size_t payloadSize = slotPayloadSize(version);
+  // An interrupted slot upgrade can leave just part of the trailer.
+  if (version >= 3 && version <= GLOBAL_STATS_VERSION && size > payloadSize &&
+      size < payloadSize + two_slot::TRAILER_BYTES)
+    return StatsLoadResult::Invalid;
+  if (size > GLOBAL_STATS_FILE_SIZE || version > GLOBAL_STATS_VERSION) return StatsLoadResult::NewerFormat;
+  if ((version == 1 && size == GLOBAL_STATS_FILE_SIZE_V1) || (version == 2 && size == GLOBAL_STATS_FILE_SIZE_V2) ||
+      (version >= 3 && version <= GLOBAL_STATS_VERSION && size == payloadSize))
+    return StatsLoadResult::Ok;
+  return StatsLoadResult::Invalid;
+}
 
-  // A partial trailer on a current-version payload is a torn slot. Try the other save.
-  if (outcome.version == GLOBAL_STATS_VERSION && outcome.fileSize > GLOBAL_STATS_FILE_SIZE &&
-      outcome.fileSize < GLOBAL_STATS_FILE_SIZE + two_slot::TRAILER_BYTES)
-    return outcome;
-
-  if (outcome.fileSize > static_cast<size_t>(GLOBAL_STATS_FILE_SIZE) || outcome.version > GLOBAL_STATS_VERSION) {
-    outcome.result = StatsLoadResult::NewerFormat;
-    return outcome;
-  }
-
-  if (n == GLOBAL_STATS_FILE_SIZE_V1 && data[0] == GLOBAL_STATS_VERSION_V1) {
-    loadCommonFields(data, out);
-    out.completedBooks = 0;
-    outcome.result = StatsLoadResult::Ok;
-    return outcome;
-  }
-
-  if (n == GLOBAL_STATS_FILE_SIZE_V2 && data[0] == GLOBAL_STATS_VERSION_V2) {
-    loadCommonFields(data, out);
-    out.completedBooks = readLe32(data, 13);
-    outcome.result = StatsLoadResult::Ok;
-    return outcome;
-  }
-
-  if (!((n == GLOBAL_STATS_FILE_SIZE && data[0] == GLOBAL_STATS_VERSION) ||
-        (n == GLOBAL_STATS_FILE_SIZE_V3 && data[0] == 3)))
-    return outcome;
+void decodeGlobalPayload(const uint8_t* data, size_t n, GlobalReadingStats& out) {
+  out = {};
   loadCommonFields(data, out);
+  if (n == GLOBAL_STATS_FILE_SIZE_V1) return;
   out.completedBooks = readLe32(data, 13);
+  if (n == GLOBAL_STATS_FILE_SIZE_V2) {
+    out.unassignedLegacyBooks = out.completedBooks;
+    return;
+  }
   for (size_t i = 0; i < out.timeOfDaySeconds.size(); ++i) {
     out.timeOfDaySeconds[i] = readLe32(data, 17 + static_cast<int>(i) * 4);
   }
@@ -215,9 +213,29 @@ StatsLoadOutcome loadFromOpenFile(FsFile& f, GlobalReadingStats& out) {
   out.readingHistoryAnchorDay = readLe32(data, 61);
   memcpy(out.readingHistoryBits.data(), data + 65, out.readingHistoryBits.size());
   out.longestReadingStreak = readLe16(data, 157);
-  if (n == GLOBAL_STATS_FILE_SIZE)
+  if (n >= GLOBAL_STATS_FILE_SIZE_V4)
     memcpy(out.counterId.bytes.data(), data + GLOBAL_STATS_FILE_SIZE_V3, out.counterId.bytes.size());
-  outcome.result = StatsLoadResult::Ok;
+  if (n == GLOBAL_STATS_FILE_SIZE) {
+    out.completedArticles = readLe32(data, GLOBAL_STATS_FILE_SIZE_V4);
+    out.unassignedLegacyBooks = readLe32(data, 179);
+    out.articleMarked = (data[183] & 1u) || out.completedArticles > 0;
+  } else {
+    out.unassignedLegacyBooks = out.completedBooks;
+  }
+}
+
+StatsLoadOutcome loadFromOpenFile(FsFile& f, GlobalReadingStats& out) {
+  StatsLoadOutcome outcome;
+  uint8_t version = 0;
+  if (f.read(&version, 1) != 1 || !f.seekSet(0)) return outcome;
+  outcome.fileSize = two_slot::payloadLength(f, slotPayloadSize(version));
+  uint8_t data[GLOBAL_STATS_FILE_SIZE] = {};
+  const size_t bytesToRead = std::min(outcome.fileSize, sizeof(data));
+  const int n = f.read(data, bytesToRead);
+  if (n <= 0 || static_cast<size_t>(n) != bytesToRead) return outcome;
+  outcome.version = data[0];
+  outcome.result = classifyGlobalPayload(outcome.version, outcome.fileSize);
+  if (outcome.result == StatsLoadResult::Ok) decodeGlobalPayload(data, outcome.fileSize, out);
   return outcome;
 }
 
@@ -237,12 +255,9 @@ bool saveToFile(const GlobalReadingStats& stats, const char* path, const char* b
   return two_slot::write(
       "GSTATS", path, backupPath, data, sizeof(data),
       [](const uint8_t* bytes, size_t size) {
-        return (size == GLOBAL_STATS_FILE_SIZE && bytes[0] == GLOBAL_STATS_VERSION) ||
-               (size == GLOBAL_STATS_FILE_SIZE_V1 && bytes[0] == GLOBAL_STATS_VERSION_V1) ||
-               (size == GLOBAL_STATS_FILE_SIZE_V2 && bytes[0] == GLOBAL_STATS_VERSION_V2) ||
-               (size == GLOBAL_STATS_FILE_SIZE_V3 && bytes[0] == 3);
+        return size != 0 && classifyGlobalPayload(bytes[0], size) == StatsLoadResult::Ok;
       },
-      GLOBAL_STATS_FILE_SIZE_V3);
+      {GLOBAL_STATS_FILE_SIZE_V4, GLOBAL_STATS_FILE_SIZE_V3}, ".new");
 }
 
 }  // namespace
@@ -287,8 +302,8 @@ static StatsLoadOutcome loadFromFile(const char* path, GlobalReadingStats& out, 
   outcome = loadFromOpenFile(f, out);
   if (!f.close()) outcome.result = StatsLoadResult::Invalid;
   if (primary && outcome.result != StatsLoadResult::NewerFormat) {
-    const std::string selected =
-        two_slot::preferredPath("GSTATS", path, GLOBAL_STATS_FILE_SIZE, false, GLOBAL_STATS_FILE_SIZE_V3);
+    const std::string selected = two_slot::preferredPath("GSTATS", path, GLOBAL_STATS_FILE_SIZE, false,
+                                                         {GLOBAL_STATS_FILE_SIZE_V4, GLOBAL_STATS_FILE_SIZE_V3});
     if (selected != path && Storage.openFileForRead("GSTATS", selected, f)) {
       outcome = loadFromOpenFile(f, out);
       if (!f.close()) outcome.result = StatsLoadResult::Invalid;
@@ -297,7 +312,7 @@ static StatsLoadOutcome loadFromFile(const char* path, GlobalReadingStats& out, 
   return outcome;
 }
 
-bool GlobalReadingStats::loadForUpload(GlobalReadingStats& stats) {
+static bool readLocalHistory(GlobalReadingStats& stats) {
   stats = {};
   if (s_blockDestructiveSave) return false;
   const std::string path = StatsStorage::localPath(GLOBAL_STATS_PATH);
@@ -313,6 +328,10 @@ bool GlobalReadingStats::loadForUpload(GlobalReadingStats& stats) {
   return backup.result == StatsLoadResult::Ok;
 }
 
+bool GlobalReadingStats::loadForUpload(GlobalReadingStats& stats) {
+  return !s_articleRecoveryPending && readLocalHistory(stats);
+}
+
 bool GlobalReadingStats::exportLocal(uint8_t* data, size_t capacity) {
   GlobalReadingStats stats;
   if (!data || capacity < CURRENT_FILE_SIZE || !loadForUpload(stats)) return false;
@@ -320,8 +339,30 @@ bool GlobalReadingStats::exportLocal(uint8_t* data, size_t capacity) {
   return true;
 }
 
-GlobalReadingStats GlobalReadingStats::load() {
+size_t GlobalReadingStats::copyForNearby(const std::array<uint8_t, CURRENT_FILE_SIZE>& local, const uint8_t peerVersion,
+                                         uint8_t* out, const size_t capacity) {
+  static constexpr size_t sizes[] = {0,
+                                     GLOBAL_STATS_FILE_SIZE_V1,
+                                     GLOBAL_STATS_FILE_SIZE_V2,
+                                     GLOBAL_STATS_FILE_SIZE_V3,
+                                     V4_FILE_SIZE,
+                                     CURRENT_FILE_SIZE};
+  static_assert(std::size(sizes) == CURRENT_FILE_VERSION + 1);
+  const uint8_t version = std::min(peerVersion, CURRENT_FILE_VERSION);
+  const size_t size = sizes[version];
+  if (!out || !size || size > capacity || local[0] != CURRENT_FILE_VERSION) return 0;
+  memcpy(out, local.data(), size);
+  out[0] = version;
+  if (version >= 2 && version < CURRENT_FILE_VERSION) {
+    // Older readers have a single completion count. Their remaining fields are a prefix of v5.
+    progress_record::writeU32(out + 13, addSaturated(readLe32(local.data(), 13), readLe32(local.data(), V4_FILE_SIZE)));
+  }
+  return size;
+}
+
+static GlobalReadingStats loadLocalStats() {
   GlobalReadingStats stats;
+  if (s_articleRecoveryPending) return stats;
   const std::string path = StatsStorage::localPath(GLOBAL_STATS_PATH);
   if (path.empty()) {
     s_blockDestructiveSave = true;
@@ -363,7 +404,9 @@ GlobalReadingStats GlobalReadingStats::load() {
   return stats;
 }
 
-bool GlobalReadingStats::recoveryRequired() { return s_blockDestructiveSave; }
+GlobalReadingStats GlobalReadingStats::load() { return loadLocalStats(); }
+
+bool GlobalReadingStats::recoveryRequired() { return s_blockDestructiveSave || s_articleRecoveryPending; }
 
 bool GlobalReadingStats::readBackup(const char* path, GlobalReadingStats& stats) {
   stats = {};
@@ -389,7 +432,7 @@ bool GlobalReadingStats::restoreBackup(const char* backupPath) {
   // Keep the original bytes, including unreadable slots, rather than turning a
   // failed recovery write into permanent loss. These are cold, user-requested
   // path allocations, independent of book size.
-  for (const char* suffix : {"", ".bak", ".tmp"}) {
+  for (const char* suffix : {"", ".bak", ".tmp", ".article"}) {
     const std::string source = path + suffix;
     if (!Storage.exists(source.c_str()) && confirmedMissingFile(source.c_str(), true)) continue;
     bool archived = false;
@@ -410,7 +453,7 @@ bool GlobalReadingStats::restoreBackup(const char* backupPath) {
     LOG_ERR("GSTATS", "Recovered stats could not be read back");
     return false;
   }
-  // Two bounded 175-byte snapshots on this cold recovery path verify every
+  // Two bounded serialized snapshots on this cold recovery path verify every
   // persisted field without depending on struct padding or another allocation.
   std::array<uint8_t, CURRENT_FILE_SIZE> intended{}, actual{};
   serializeStats(restored, intended.data());
@@ -424,6 +467,7 @@ bool GlobalReadingStats::restoreBackup(const char* backupPath) {
     return false;
   }
   s_blockDestructiveSave = false;
+  s_articleRecoveryPending = false;
   // An open reader must replace its live counters after explicit restoration.
   // resetLocal() and recovery share this revision (defined below).
   ++s_localResetRevision;
@@ -488,21 +532,265 @@ GlobalReadingStats GlobalReadingStats::loadAggregated(const GlobalReadingStats& 
   return stats;
 }
 
+namespace {
+bool countedHere(const BookReadingStats& book, const GlobalReadingStats& global) {
+  if (!book.isCompleted || !book.completionCredited) return false;
+  return book.legacyCompletion ? global.unassignedLegacyBooks > 0
+                               : book.completionCounterId.bytes == global.counterId.bytes;
+}
+
+void reclassify(BookReadingStats& book, GlobalReadingStats& global, const bool desired) {
+  const bool counted = countedHere(book, global);
+  uint32_t& source = book.isArticle ? global.completedArticles : global.completedBooks;
+  book.isArticle = desired;
+  if (book.legacyCompletion) {
+    book.legacyCompletion = false;
+    book.completionCredited = counted;
+    if (counted) {
+      book.completionCounterId = global.counterId;
+      --global.unassignedLegacyBooks;
+    }
+  }
+  if (!counted || source == 0) return;
+  --source;
+  uint32_t& destination = desired ? global.completedArticles : global.completedBooks;
+  destination = addSaturated(destination, 1);
+}
+}  // namespace
+
+bool GlobalReadingStats::setCompleted(BookReadingStats& book, const bool completed, const bool track) {
+  if (book.isCompleted == completed) return false;
+  uint32_t& count = book.isArticle ? completedArticles : completedBooks;
+  const uint32_t before = count;
+  if (book.isArticle && (before || (completed && track))) articleMarked = true;
+  if (completed && track) count = addSaturated(count, 1);
+  if (!completed && countedHere(book, *this) && count > 0) {
+    --count;
+    if (book.legacyCompletion) --unassignedLegacyBooks;
+  }
+  book.legacyCompletion = false;
+  book.isCompleted = completed;
+  book.completionCredited = completed && track;
+  book.completionCounterId = book.completionCredited ? counterId : StatsCounterId{};
+  return count != before;
+}
+
+namespace {
+struct CompletionCounts {
+  uint32_t books;
+  uint32_t articles;
+  uint32_t legacy;
+
+  static CompletionCounts from(const GlobalReadingStats& g) {
+    return {g.completedBooks, g.completedArticles, g.unassignedLegacyBooks};
+  }
+  bool matches(const GlobalReadingStats& g) const {
+    return books == g.completedBooks && articles == g.completedArticles && legacy == g.unassignedLegacyBooks;
+  }
+  void apply(GlobalReadingStats& g) const {
+    g.completedBooks = books;
+    g.completedArticles = articles;
+    g.unassignedLegacyBooks = legacy;
+  }
+};
+static_assert(sizeof(CompletionCounts) == 12);
+
+struct ArticleTransfer {
+  StatsCounterId globalId;
+  StatsCounterId bookId;
+  CompletionCounts before;
+  CompletionCounts after;
+  uint8_t flags;
+  static constexpr uint8_t TO_ARTICLE = 1;
+  static constexpr uint8_t PREVIOUSLY_MARKED = 2;
+
+  bool marked(bool committed) const { return (flags & PREVIOUSLY_MARKED) || (committed && (flags & TO_ARTICLE)); }
+
+  bool publish(const std::string& path, const std::string& cachePath) const {
+    SyncFiles::Writer writer(path.c_str());
+    return cachePath.size() <= 64 && writer.open() && writer.pod(uint8_t{2}) && writer.pod(globalId.bytes) &&
+           writer.pod(bookId.bytes) && writer.pod(before) && writer.pod(after) && writer.pod(flags) &&
+           writer.string16(cachePath) && writer.commit();
+  }
+  bool read(const std::string& path, std::string& cachePath) {
+    SyncFiles::Reader reader(path.c_str());
+    uint8_t version = 0;
+    const bool valid =
+        reader.open() == SyncFiles::Reader::Source::Main && reader.pod(version) && (version == 1 || version == 2) &&
+        reader.pod(globalId.bytes) && reader.pod(bookId.bytes) && reader.pod(before) && reader.pod(after) &&
+        reader.pod(flags) && flags <= (version == 1 ? TO_ARTICLE : (TO_ARTICLE | PREVIOUSLY_MARKED)) &&
+        reader.string16(cachePath, 64) && reader.atEnd() && cachePath.rfind("/.crosspoint/epub_", 0) == 0 &&
+        cachePath.find('/', 13) == std::string::npos && cachePath.find('\0') == std::string::npos;
+    if (version == 1 && before.articles > 0) flags |= PREVIOUSLY_MARKED;
+    return valid;
+  }
+};
+
+// An unreadable slot could hold newer totals. Decode each successfully read
+// snapshot directly, retaining the newest valid one without reopening its file.
+bool readGlobalForArticleEdit(GlobalReadingStats& stats, bool* newHistory = nullptr) {
+  if (newHistory) *newHistory = false;
+  const auto path = StatsStorage::localPath(GLOBAL_STATS_PATH);
+  if (s_blockDestructiveSave) return false;
+  if (path.empty() || Storage.exists((path + ".recovery").c_str())) {
+    s_blockDestructiveSave = true;
+    return false;
+  }
+  progress_record::Slot best;
+  bool present = false;
+  uint8_t data[two_slot::MAX_FILE_BYTES];
+  for (const auto& candidate : {path, path + ".bak"}) {
+    const auto slot = two_slot::readSlot("GSTATS", candidate.c_str(), GLOBAL_STATS_FILE_SIZE, data,
+                                         {GLOBAL_STATS_FILE_SIZE_V4, GLOBAL_STATS_FILE_SIZE_V3});
+    if (slot.ioError) return false;
+    if (!slot.present) {
+      if (!confirmedMissingFile(candidate.c_str())) return false;
+      continue;
+    }
+    present = true;
+    if (!slot.size) continue;
+    const auto format = classifyGlobalPayload(data[0], slot.size);
+    if (format == StatsLoadResult::NewerFormat) {
+      s_blockDestructiveSave = true;
+      LOG_ERR("GSTATS", "Cannot classify title with newer global history: %s", candidate.c_str());
+      return false;
+    }
+    if (format == StatsLoadResult::Ok && progress_record::newest(best, slot.slot) == progress_record::BACKUP) {
+      decodeGlobalPayload(data, slot.size, stats);
+      best = slot.slot;
+    }
+  }
+  if (best.kind != progress_record::SlotKind::Invalid) return true;
+  if (present) {
+    s_blockDestructiveSave = true;
+    LOG_ERR("GSTATS", "Cannot classify title with invalid global history");
+    return false;
+  }
+  if (!newHistory) return false;
+  stats = {};
+  stats.counterId = StatsCounterId::create();
+  *newHistory = true;
+  return true;
+}
+
+bool readExistingTransferBook(const std::string& cachePath, BookReadingStats& book) {
+  bool newHistory;
+  return BookReadingStats::loadForEdit(cachePath, book, nullptr, newHistory) && !newHistory;
+}
+
+bool reconcileArticleTransfer(const std::string& globalPath) {
+  const std::string marker = globalPath + ".article";
+  if (!Storage.exists(marker.c_str())) return true;  // An unpublished .tmp precedes both snapshot writes.
+  ArticleTransfer txn{};
+  std::string cachePath;
+  BookReadingStats book;
+  GlobalReadingStats global;
+  if (!txn.read(marker, cachePath) || !readExistingTransferBook(cachePath, book) || !readGlobalForArticleEdit(global) ||
+      book.counterId.bytes != txn.bookId.bytes || global.counterId.bytes != txn.globalId.bytes ||
+      (!txn.before.matches(global) && !txn.after.matches(global))) {
+    LOG_ERR("GSTATS", "Cannot verify pending article transfer; preserving both histories");
+    return false;
+  }
+  // The title is written last. Its durable category decides which absolute counts should survive a restart.
+  const bool committed = book.isArticle == bool(txn.flags & ArticleTransfer::TO_ARTICLE);
+  const CompletionCounts& counts = committed ? txn.after : txn.before;
+  if (!counts.matches(global) || global.hasArticles() != txn.marked(committed)) {
+    global.articleMarked = txn.marked(committed);
+    counts.apply(global);
+    if (!saveToFile(global, globalPath.c_str(), (globalPath + ".bak").c_str())) return false;
+  }
+  return Storage.remove(marker.c_str());
+}
+}  // namespace
+
+bool GlobalReadingStats::recoverArticleTransfer() {
+  const std::string path = StatsStorage::localPath(GLOBAL_STATS_PATH, false, true);
+  s_articleRecoveryPending = path.empty() || !reconcileArticleTransfer(path);
+  if (s_articleRecoveryPending) LOG_ERR("GSTATS", "Article transfer still pending");
+  return !s_articleRecoveryPending;
+}
+
+bool GlobalReadingStats::toggleArticle(const std::string& cachePath, bool& article, BookReadingStats* live,
+                                       const StatsCounterId* liveGlobalId) {
+  if (s_articleRecoveryPending && !recoverArticleTransfer()) return false;
+  if (cachePath.empty() || (!Storage.exists(cachePath.c_str()) && !Storage.mkdir(cachePath.c_str()))) {
+    LOG_ERR("BSTAT", "Cannot open book cache: %s", cachePath.c_str());
+    return false;
+  }
+  BookReadingStats book;
+  bool newBook, newGlobal;
+  if (!BookReadingStats::loadForEdit(cachePath, book, live ? &live->counterId : nullptr, newBook)) return false;
+  GlobalReadingStats global;
+  if (!readGlobalForArticleEdit(global, &newGlobal)) return false;
+  const bool desired = !book.isArticle;
+  const bool hadArticles = global.hasArticles();
+  // The first mark can precede both histories. Publish their original identities and categories
+  // before the journal references them, so a reboot can verify either outcome.
+  if (newGlobal && desired) {
+    if (liveGlobalId) global.counterId = *liveGlobalId;
+    if (!global.saveSnapshot()) return false;
+  }
+  if (newBook && !hadArticles && !book.save(cachePath)) return false;
+  const CompletionCounts before = CompletionCounts::from(global);
+  reclassify(book, global, desired);
+  global.articleMarked = hadArticles || desired;
+  const bool updateGlobal = !before.matches(global) || global.articleMarked != hadArticles;
+  std::string marker;
+  if (updateGlobal) {
+    const std::string path = StatsStorage::localPath(GLOBAL_STATS_PATH);
+    if (path.empty()) return false;
+    marker = path + ".article";
+    const uint8_t flags =
+        (desired ? ArticleTransfer::TO_ARTICLE : 0) | (hadArticles ? ArticleTransfer::PREVIOUSLY_MARKED : 0);
+    const ArticleTransfer txn{global.counterId, book.counterId, before, CompletionCounts::from(global), flags};
+    if (Storage.exists(marker.c_str()) || !txn.publish(marker, cachePath)) {
+      LOG_ERR("GSTATS", "Could not publish article transfer");
+      s_articleRecoveryPending = Storage.exists(marker.c_str());
+      return false;
+    }
+    if (!global.saveSnapshot()) {
+      // A sync/close error can still leave a complete, checksummed slot.
+      if (!readGlobalForArticleEdit(global) || !txn.after.matches(global) || global.hasArticles() != txn.marked(true) ||
+          global.counterId.bytes != txn.globalId.bytes) {
+        recoverArticleTransfer();
+        return false;
+      }
+    }
+  }
+
+  if (!book.save(cachePath) && (!readExistingTransferBook(cachePath, book) || book.isArticle != desired)) {
+    if (updateGlobal) recoverArticleTransfer();
+    return false;
+  }
+  if (updateGlobal && !Storage.remove(marker.c_str())) recoverArticleTransfer();
+  if (live) {
+    live->isArticle = desired;
+    live->completionCounterId = book.completionCounterId;
+    live->completionCredited = book.completionCredited;
+    live->legacyCompletion = book.legacyCompletion;
+  }
+  article = desired;
+  return true;
+}
+
 bool GlobalReadingStats::save() const {
   const bool dailySaved = DailyReadingStats::flush();
   if (!dailySaved) LOG_ERR("GSTATS", "Failed to flush daily reading counters");
-  if (s_blockDestructiveSave) {
+  // Keep the global snapshot even if the independent daily flush needs retrying.
+  return saveSnapshot() && dailySaved;
+}
+
+bool GlobalReadingStats::saveSnapshot() const {
+  if (recoveryRequired()) {
     LOG_ERR("GSTATS", "Refusing to overwrite protected reading history");
     return false;
   }
-  // Keep the global snapshot even if the independent daily flush needs retrying.
   const std::string path = StatsStorage::localPath(GLOBAL_STATS_PATH);
-  const bool globalSaved = !path.empty() && saveToFile(*this, path.c_str(), (path + ".bak").c_str());
-  return globalSaved && dailySaved;
+  return !path.empty() && saveToFile(*this, path.c_str(), (path + ".bak").c_str());
 }
 
 bool GlobalReadingStats::resetLocal() {
-  if (s_blockDestructiveSave) {
+  if (recoveryRequired()) {
     LOG_ERR("GSTATS", "Recover unreadable history before resetting counters");
     return false;
   }
@@ -518,6 +806,7 @@ uint32_t GlobalReadingStats::localResetRevision() { return s_localResetRevision;
 
 #ifdef STATS_STORAGE_TEST
 void resetGlobalReadingStatsForTest() {
+  s_articleRecoveryPending = false;
   s_blockDestructiveSave = false;
   s_localResetRevision = 0;
 }

@@ -170,18 +170,9 @@ float loadTxtProgressPercent(const RecentBook& book) {
     return -1.0f;
   }
 
-  FsFile progressFile;
-  if (!Storage.openFileForRead("RBPR", txt.getCachePath() + "/progress.bin", progressFile)) {
-    return -1.0f;
-  }
-
-  // TXT progress starts with a 16-bit page number; the remaining bytes are a
-  // file offset used only to restore the reader page.
-  // Read the reader's four-byte minimum so an interrupted write is rejected,
-  // then decode only its two-byte page field.
+  // Legacy Home records have at least four bytes. Only the page number is needed here.
   uint8_t progressData[4];
-  const int progressBytes = progressFile.read(progressData, sizeof(progressData));
-  progressFile.close();
+  const int progressBytes = txt.readProgress("RBPR", progressData, sizeof(progressData));
   if (progressBytes != static_cast<int>(sizeof(progressData))) {
     return -1.0f;
   }

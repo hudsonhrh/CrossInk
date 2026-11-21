@@ -17,6 +17,10 @@
 
 namespace xtc {
 
+// XTG rows and XTH columns each start on a byte boundary.
+constexpr size_t xtgPageBytes(uint16_t width, uint16_t height) { return ((width + 7u) / 8) * height; }
+constexpr size_t xtchPlaneBytes(uint16_t width, uint16_t height) { return ((height + 7u) / 8) * width; }
+
 // XTC file magic numbers (little-endian)
 // "XTC\0" = 0x58, 0x54, 0x43, 0x00
 constexpr uint32_t XTC_MAGIC = 0x00435458;  // "XTC\0" in little-endian (1-bit fast mode)
@@ -81,7 +85,7 @@ struct XtgPageHeader {
   //   dataSize = ((width + 7) / 8) * height
   //
   // XTH (2-bit): Two bit planes, column-major (right-to-left), 8 vertical pixels/byte
-  //   dataSize = ((width * height + 7) / 8) * 2
+  //   dataSize = width * ((height + 7) / 8) * 2
   //   First plane: Bit1 for all pixels
   //   Second plane: Bit2 for all pixels
   //   pixelValue = (bit1 << 1) | bit2

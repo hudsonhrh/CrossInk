@@ -140,6 +140,7 @@ bool isZeroMac(const std::array<uint8_t, 6>& mac) { return mac == std::array<uin
 
 bool isValidStatsPayload(const uint8_t* data, const uint8_t size) {
   return (size == MIN_STATS_BYTES && data[0] == 1) || (size == 17 && data[0] == 2) || (size == 159 && data[0] == 3) ||
+         (size == GlobalReadingStats::V4_FILE_SIZE && data[0] == 4) ||
          (size == MAX_STATS_BYTES && data[0] == GlobalReadingStats::CURRENT_FILE_VERSION);
 }
 
@@ -329,7 +330,6 @@ bool NearbyStatsSyncActivity::prepareLocalStats() {
     return false;
   }
 
-  localStatsSize_ = static_cast<uint8_t>(GlobalReadingStats::CURRENT_FILE_SIZE);
   localStatsReady_ = true;
   return true;
 }
@@ -363,6 +363,7 @@ void NearbyStatsSyncActivity::enqueueEspNowPacket(const uint8_t* sourceMac, cons
   const PacketType packetType = static_cast<PacketType>(data[5]);
   event.type = packetType;
   event.statsSize = data[6];
+  event.peerStatsVersion = data[7];
   std::copy(sourceMac, sourceMac + event.sourceMac.size(), event.sourceMac.begin());
   std::copy(data + 8, data + 14, event.deviceMac.begin());
 
@@ -480,6 +481,10 @@ void NearbyStatsSyncActivity::handleEvent(const SyncEvent& event) {
     lastStatsSendMs_ = 0;
   }
 
+  // Original HELLO packets leave byte 7 zero. All original Nearby readers support v3.
+  // An incoming legacy snapshot tells us the exact format its sender uses.
+  peerStatsVersion_ = event.peerStatsVersion;
+  if (!peerStatsVersion_) peerStatsVersion_ = event.type == PacketType::STATS ? event.stats[0] : 3;
   peerSeen_ = true;
   if (event.deviceMac != peerDeviceMac_) {
     peerName_.clear();
@@ -539,15 +544,16 @@ bool NearbyStatsSyncActivity::sendPacket(const PacketType type, const uint8_t* p
   packet[3] = 'S';
   packet[4] = PROTOCOL_VERSION;
   packet[5] = static_cast<uint8_t>(type);
-  packet[7] = 0;
+  packet[7] = GlobalReadingStats::CURRENT_FILE_VERSION;
   std::copy(localDeviceMac_.begin(), localDeviceMac_.end(), packet.begin() + 8);
 
   size_t length = PACKET_HEADER_BYTES;
   if (type == PacketType::STATS) {
-    packet[6] = localStatsSize_;
-    if (!localStatsReady_ || !isValidStatsPayload(localStats_.data(), localStatsSize_)) return false;
-    std::copy(localStats_.begin(), localStats_.begin() + localStatsSize_, packet.begin() + PACKET_HEADER_BYTES);
-    length += localStatsSize_;
+    if (!localStatsReady_) return false;
+    packet[6] = GlobalReadingStats::copyForNearby(localStats_, peerStatsVersion_, packet.data() + PACKET_HEADER_BYTES,
+                                                  packet.size() - PACKET_HEADER_BYTES);
+    if (!packet[6]) return false;
+    length += packet[6];
   } else if (type == PacketType::NAME) {
     const char* name = SETTINGS.getEffectiveDeviceName();
     const size_t nameLength = std::min(std::strlen(name), static_cast<size_t>(MAX_DEVICE_NAME_BYTES));

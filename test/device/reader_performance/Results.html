@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>X4 Pro hardware results</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#182e2b;background:#f7faf8}body{max-width:62rem;margin:2rem auto;padding:0 1rem 4rem}h1{font-weight:650;letter-spacing:-.035em}h2{font-size:1.2rem;margin-top:2rem}p{max-width:54rem}label{display:block;margin:.7rem 0}textarea,input,select,button{font:inherit}textarea{width:96%;min-height:4rem}input,select,button,textarea{border:1px solid #839a91;border-radius:.3rem;padding:.35rem;background:#fff;color:inherit}button{background:#145449;color:white;padding:.6rem 1rem;cursor:pointer}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{text-align:left;border-bottom:1px solid #ccd8d1;padding:.45rem}th{background:#e5efe9}select{margin-right:.5rem}#summary{white-space:pre-line}small{color:#405850}label>input[type=text]{display:block;width:92%;max-width:46rem}.scroll{overflow-x:auto}fieldset{border:1px solid #ccd8d1;margin:1rem 0}a{color:inherit}
+</style>
+<h1>X4 Pro hardware results</h1>
+<p>Open the raw file from the Mac copy of <b>CrossInk-Test/X4PRO-INDEX-RESULTS.txt</b>. The worksheet runs locally. Save your observations before closing or reloading it.</p>
+<label>CrossInk timing file <input type="file" id="file" accept=".txt,.csv,text/plain"></label>
+<fieldset><legend>Include timing trials</legend><small>Uncheck a trial only if an open failed, the settings differed or a run was interrupted. Record the reason below.</small><div id="trialchoices"><label><input type="checkbox" value="1" checked> Trial 1</label><label><input type="checkbox" value="2" checked> Trial 2</label><label><input type="checkbox" value="3" checked> Trial 3</label></div></fieldset>
+<p id="summary" role="status">Waiting for the device’s timing file.</p>
+<div class="scroll"><table><thead><tr><th>Book and measurement</th><th>Paired trials</th><th>A median (ms)</th><th>B median (ms)</th><th>Median change</th></tr></thead><tbody id="timings"></tbody></table></div>
+<p><small>Each timed trial has its own book path. The table compares matching trial numbers, uses the first recorded matching operation in each trial and reports medians across pairs. Later setting changes and re-indexes stay in the raw file. The percentage is the median of each pair’s (B − A) / A. Negative means B took less time. If A records zero microseconds, the absolute medians include the pair and the percentage shows how many pairs had a usable baseline. Render, mixed-setting and migration rows remain in the raw file. Three paired trials give a descriptive result for this card.</small></p>
+<h2>Device and settings</h2>
+<div id="details"></div>
+<h2>Reading and display checks</h2>
+<p>Use the step numbers in START HERE. Mark problems even if the corresponding timing improved.</p>
+<div id="checks"></div>
+<label>Photos, page-turn video timings, visual changes and reproduction steps<textarea id="notes"></textarea></label>
+<button id="save" type="button">Save hardware observations</button>
+<script>
+'use strict';
+const trials = ['Numbered.txt|txt-index','Spine-299.epub|epub-cold','Spine-299.epub|epub-warm','Spine-300.epub|epub-cold','Spine-300.epub|epub-warm'];
+const median = a => {const b=[...a].sort((x,y)=>x-y), m=Math.floor(b.length/2); return b.length%2?b[m]:(b[m-1]+b[m])/2};
+function analyze(data, included=[1,2,3]) {
+  if(!data.trim()) throw Error('The selected file is empty. Open the timing file that the reader wrote to the SD card.');
+  const lines=data.replace(/^\uFEFF/,'').trimEnd().split(/\r?\n/);
+  if(lines.shift()!=='build,operation,path,position_zero_based,elapsed_us') throw Error('Expected the CrossInk timing header. The CrossPoint PR #8 report belongs with the optional lookup kit.');
+  const groups=new Map(); let invalid=0, total=0;
+  for(const line of lines) {
+    if(!line.trim()) continue;
+    const v=line.split(',');
+    if(v.length!==5 || !/^[AB]$/.test(v[0]) || !/^CrossInk-Test\/Books\//.test(v[2]) || !/^-?\d+$/.test(v[3]) || !/^\d+$/.test(v[4]) || +v[4]>4294967295) {invalid++;continue}
+    total++;
+    const m=v[2].match(/^CrossInk-Test\/Books\/([AB])\/Trial-([123])\/([^/]+)$/);
+    if(!m || m[1]!==v[0] || !trials.includes(m[3]+'|'+v[1])) continue;
+    const key=[m[3],v[1],m[2],v[0]].join('|');
+    if(!groups.has(key)) groups.set(key,+v[4]);
+  }
+  const rows=trials.map(test=>{
+    const a=[],b=[],diff=[];
+    for(const i of included) {
+      const ad=groups.get(test+'|'+i+'|A'), bd=groups.get(test+'|'+i+'|B');
+      if(ad===undefined || bd===undefined) continue;
+      const x=ad,y=bd;
+      a.push(x);b.push(y);if(x>0) diff.push(100*(y-x)/x);
+    }
+    const fmt=arr=>arr.length?(median(arr)/1000).toFixed(2):'—';
+    let change=diff.length?median(diff).toFixed(1)+'%':'—';
+    if(diff.length<a.length) change+=' ('+diff.length+' of '+a.length+' pairs)';
+    return [test.replace('|',' / '),a.length+'/3',fmt(a),fmt(b),change];
+  });
+  return {rows,total,invalid};
+}
+const details=['Reader model and panel/controller from About (if shown)','SD card, free space and battery','Font family, size, spacing, darkness, anti-aliasing and rules','Orientation, refresh frequency, status bars, frontlight and ambient temperature','Firmware run order and any interruptions'];
+const checks=['1. Both builds recorded rows and matching first-open trials','2. TXT positions after a turn, relayout, sleep and reopen','3. Boundary text, empty book, long word and final line','4. Both EPUB sizes, near/far anchors, clipping and warm reopen','5. Baseline cache and bookmark reopened by B','6. XTCH tone order, binary turns, rotated edges and status bars','7. Mixed-size 1-bit page, Current Page sleep and recovery','8. Native-palette BMP, scaled truecolor BMP and optimized EPUB fallback','9. Repeated text turns, automatic cleanup and manual refresh','10. Ghost residual and tap-to-settle measurements, A and B','11. Usual firmware and original reading progress restored'];
+const byId = id=>document.getElementById(id);
+let result=null, selectedFile=null, raw=null, readError='';
+const includedTrials=()=>Array.from(byId('trialchoices').querySelectorAll('input:checked'),el=>+el.value);
+for(const text of details){const label=document.createElement('label');label.textContent=text;
+  const input=document.createElement('input');input.type='text';label.append(input);byId('details').append(label)}
+for(const text of checks){const label=document.createElement('label'),select=document.createElement('select');
+  for(const val of ['Not run','Pass','Fail','Inconclusive']){const opt=document.createElement('option');opt.textContent=val;select.add(opt)}
+  label.append(select,document.createTextNode(text));byId('checks').append(label)}
+function showReport(){
+  result=null;byId('timings').replaceChildren();
+  if(raw===null){
+    byId('summary').textContent=readError || (selectedFile?'Reading '+selectedFile.name+'…':'Waiting for the device’s timing file.');
+    return;
+  }
+  try{result=analyze(raw,includedTrials());
+    for(const row of result.rows){const tr=document.createElement('tr');for(const text of row){const td=document.createElement('td');td.textContent=text;tr.append(td)}byId('timings').append(tr)}
+    byId('summary').textContent=result.total+' timing rows. '+result.invalid+' malformed rows. '+result.rows.filter(r=>r[1]==='3/3').length+' of 5 timed comparisons have all three pairs.';
+  }catch(err){byId('summary').textContent=err.message}
+}
+byId('trialchoices').onchange=showReport;
+byId('file').onchange=async e=>{
+  const file=e.target.files[0] || null;
+  selectedFile=file;raw=null;readError='';showReport();
+  if(!file)return;
+  try{
+    const data=await file.text();
+    if(selectedFile!==file)return;
+    raw=data;
+  }catch(err){
+    if(selectedFile!==file)return;
+    readError='Could not read '+file.name+'. '+err.message;
+  }
+  showReport();
+};
+byId('save').onclick=()=>{
+  const out=['CrossInk X4 Pro hardware observations',new Date().toISOString(),'Timing file: '+(selectedFile?selectedFile.name:'not loaded')];
+  if(selectedFile)out.push(byId('summary').textContent);
+  if(result)out.push('Included trials: '+includedTrials().join(', '), 'Book / operation | pairs | A ms | B ms | paired change',...result.rows.map(r=>r.join(' | ')));
+  out.push('',...Array.from(byId('details').querySelectorAll('input'),(el,i)=>details[i]+': '+(el.value||'not recorded')),'',
+    ...Array.from(byId('checks').querySelectorAll('select'),(el,i)=>checks[i]+' — '+el.value),'',byId('notes').value);
+  const url=URL.createObjectURL(new Blob([out.join('\n')+'\n'],{type:'text/plain'}));
+  const a=document.createElement('a');a.download='X4PRO-HARDWARE-NOTES.txt';a.href=url;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
+</script></html>

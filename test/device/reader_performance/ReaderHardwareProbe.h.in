@@ -1,0 +1,42 @@
+// Installed only into isolated hardware-test builds by instrument.py.
+#pragma once
+
+#include <Arduino.h>
+#include <HalStorage.h>
+#include <cstdio>
+#include <cstring>
+
+class ReaderHardwareProbe {
+ public:
+  ReaderHardwareProbe(const char* path, const char* operation, int position)
+      : path_(path), operation_(operation), position_(position) {
+    if (path_ && *path_ == '/') ++path_;
+    enabled_ = path_ && strncmp(path_, "CrossInk-Test/Books/", 20) == 0;
+    if (enabled_) started_ = micros();
+  }
+
+  ~ReaderHardwareProbe() {
+    if (!enabled_) return;
+    // Unsigned subtraction also handles a microsecond counter rollover.
+    const unsigned long elapsed = static_cast<uint32_t>(micros() - started_);
+    // The supplied report must exist. Capture ends before opening it.
+    auto report = Storage.open("/CrossInk-Test/X4PRO-INDEX-RESULTS.txt", O_WRONLY | O_APPEND);
+    if (!report) {
+      Serial.println("Reader test could not open its results file");
+      return;
+    }
+    char row[192];
+    const int len = snprintf(row, sizeof(row), "@BUILD@,%s,%s,%d,%lu\n", operation_, path_, position_, elapsed);
+    if (len <= 0 || static_cast<size_t>(len) >= sizeof(row) ||
+        report.write(reinterpret_cast<const uint8_t*>(row), len) != static_cast<size_t>(len))
+      Serial.println("Reader test could not write a complete result");
+    report.close();
+  }
+
+ private:
+  const char* path_;
+  const char* operation_;
+  int position_;
+  uint32_t started_ = 0;
+  bool enabled_ = false;
+};

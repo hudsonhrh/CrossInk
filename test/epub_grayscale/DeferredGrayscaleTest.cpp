@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 class HalDisplay {
  public:
-  enum { FAST_REFRESH };
+  enum RefreshMode { FAST_REFRESH, HALF_REFRESH, FULL_REFRESH };
 };
 #include "DeferredGrayscale.h"
 #include "ReaderGrayscale.h"
@@ -10,6 +10,44 @@ class DeferredGrayscaleTest : public testing::Test {
   void SetUp() override { fakeheap::reset(); }
   void TearDown() override { EXPECT_TRUE(fakeheap::live.empty()); }
 };
+TEST(ReaderPageToneHistory, CleansOnlyUncertainGrayscaleTransitions) {
+  using ReaderUtils::PageTone;
+  for (auto previous : {PageTone::Monochrome, PageTone::GrayText, PageTone::GrayImage}) {
+    for (auto next : {PageTone::Monochrome, PageTone::GrayText, PageTone::GrayImage}) {
+      ReaderUtils::PageToneHistory history;
+      EXPECT_FALSE(history.advanceTo(previous));
+      const bool clean = (previous != PageTone::Monochrome && next == PageTone::Monochrome) ||
+                         (previous == PageTone::GrayImage && next == PageTone::GrayText);
+      EXPECT_EQ(history.advanceTo(next), clean);
+      EXPECT_FALSE(history.advanceTo(next));
+    }
+  }
+}
+
+TEST_F(DeferredGrayscaleTest, SeparateBaseUsesAaTransitionAndPreconditionsOnlyAfterCleanup) {
+  GfxRenderer renderer;
+  for (auto mode : {HalDisplay::FAST_REFRESH, HalDisplay::HALF_REFRESH, HalDisplay::FULL_REFRESH}) {
+    renderer.events.clear();
+    ReaderUtils::displayReaderGrayscaleBase(renderer, mode);
+    const std::vector<std::string> expected =
+        mode == HalDisplay::FAST_REFRESH ? std::vector<std::string>{"combined-base"}
+                                         : std::vector<std::string>{"display", "precondition"};
+    EXPECT_EQ(renderer.events, expected);
+    EXPECT_EQ(renderer.baseMode, mode);
+  }
+}
+
+TEST_F(DeferredGrayscaleTest, CombinedBaseOwnsFastAndCleanupPresentations) {
+  GfxRenderer renderer;
+  renderer.combinedBase = true;
+  for (auto mode : {HalDisplay::FAST_REFRESH, HalDisplay::HALF_REFRESH, HalDisplay::FULL_REFRESH}) {
+    renderer.events.clear();
+    ReaderUtils::displayReaderGrayscaleBase(renderer, mode);
+    EXPECT_EQ(renderer.events, (std::vector<std::string>{"combined-base"}));
+    EXPECT_EQ(renderer.baseMode, mode);
+  }
+}
+
 TEST_F(DeferredGrayscaleTest, RendersWhileBaseRunsAndReusesPlanesWithoutChangingBw) {
   GfxRenderer renderer(800, 480);
   ReaderUtils::DeferredGrayscalePlanes planes;
