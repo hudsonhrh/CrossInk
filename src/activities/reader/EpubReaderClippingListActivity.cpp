@@ -11,7 +11,6 @@
 #include "ReaderUtils.h"
 #include "activities/ActivityResult.h"
 #include "activities/home/FileBrowserActionActivity.h"
-#include "clippings/ClippingPreview.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
@@ -28,6 +27,7 @@ constexpr int DETAIL_BOTTOM_RESERVE = 55;
 constexpr int DETAIL_LINE_GAP = 6;
 constexpr int TOUCH_DETAIL_BUTTON_HEIGHT = 52;
 constexpr int TOUCH_DETAIL_PAGE_LABEL_RESERVE = 24;
+static_assert(CLIPPING_TEXT_MAX <= UINT16_MAX);
 
 Rect clippingHeaderRect(const GfxRenderer& renderer, const Rect& safe, const MappedInputManager& mappedInput) {
   return TouchHeaderBackButton::headerRect(renderer, mappedInput, safe);
@@ -37,112 +37,6 @@ Rect touchDetailOpenButtonRect(const Rect& safe, const ThemeMetrics& metrics) {
   const int sidePadding = std::min(metrics.contentSidePadding, std::max(0, safe.width / 2 - 1));
   return Rect{safe.x + sidePadding, safe.y + safe.height - metrics.verticalSpacing - TOUCH_DETAIL_BUTTON_HEIGHT,
               std::max(1, safe.width - sidePadding * 2), TOUCH_DETAIL_BUTTON_HEIGHT};
-}
-
-void buildOneLineSnippetText(const std::string& text, std::string& out) {
-  out.clear();
-  bool lastWasSpace = true;
-  for (size_t i = 0; i < text.size();) {
-    const size_t advance = clippingPreview::utf8SpaceLength(text.data() + i, text.size() - i);
-    if (advance != 0) {
-      if (!lastWasSpace) {
-        out += ' ';
-        lastWasSpace = true;
-      }
-      i += advance;
-      continue;
-    }
-
-    const char c = text[i++];
-    if (c == '\r' || c == '\n' || c == '\t') {
-      if (!lastWasSpace) {
-        out += ' ';
-        lastWasSpace = true;
-      }
-      continue;
-    }
-    out += c;
-    lastWasSpace = c == ' ';
-  }
-  while (!out.empty() && out.back() == ' ') {
-    out.pop_back();
-  }
-}
-
-size_t utf8CharLen(const std::string& text, const size_t index) {
-  const auto c = static_cast<unsigned char>(text[index]);
-  if ((c & 0x80) == 0) return 1;
-  if ((c & 0xE0) == 0xC0 && index + 1 < text.size()) return 2;
-  if ((c & 0xF0) == 0xE0 && index + 2 < text.size()) return 3;
-  if ((c & 0xF8) == 0xF0 && index + 3 < text.size()) return 4;
-  return 1;
-}
-
-void appendLongWordLines(const GfxRenderer& renderer, const int fontId, const std::string& word, const int maxWidth,
-                         std::vector<std::string>& out) {
-  // Measure in place and roll back on overflow so the line buffer grows to its
-  // high-water mark once instead of allocating two temporaries per character.
-  std::string line;
-  for (size_t i = 0; i < word.size();) {
-    const size_t charLen = utf8CharLen(word, i);
-    const size_t committedLen = line.size();
-    line.append(word, i, charLen);
-    if (committedLen > 0 && renderer.getTextWidth(fontId, line.c_str()) > maxWidth) {
-      line.resize(committedLen);
-      out.push_back(line);
-      line.assign(word, i, charLen);
-    }
-    i += charLen;
-  }
-  if (!line.empty()) out.push_back(line);
-}
-
-void appendWrappedWord(const GfxRenderer& renderer, const int fontId, const std::string& word, const int maxWidth,
-                       std::string& currentLine, std::vector<std::string>& out) {
-  if (word.empty()) return;
-
-  if (renderer.getTextWidth(fontId, word.c_str()) > maxWidth) {
-    if (!currentLine.empty()) {
-      out.push_back(currentLine);
-      currentLine.clear();
-    }
-    appendLongWordLines(renderer, fontId, word, maxWidth, out);
-    return;
-  }
-
-  const std::string candidate = currentLine.empty() ? word : currentLine + " " + word;
-  if (renderer.getTextWidth(fontId, candidate.c_str()) <= maxWidth) {
-    currentLine = candidate;
-    return;
-  }
-
-  if (!currentLine.empty()) out.push_back(currentLine);
-  currentLine = word;
-}
-
-void buildWrappedDetailLines(const GfxRenderer& renderer, const int fontId, const std::string& text, const int maxWidth,
-                             std::vector<std::string>& out) {
-  out.clear();
-  if (maxWidth <= 0) return;
-
-  std::string currentLine;
-  size_t wordStart = 0;
-  while (wordStart < text.size()) {
-    while (wordStart < text.size() && text[wordStart] == ' ') {
-      wordStart++;
-    }
-    if (wordStart >= text.size()) break;
-
-    size_t wordEnd = wordStart;
-    while (wordEnd < text.size() && text[wordEnd] != ' ') {
-      wordEnd++;
-    }
-
-    appendWrappedWord(renderer, fontId, text.substr(wordStart, wordEnd - wordStart), maxWidth, currentLine, out);
-    wordStart = wordEnd;
-  }
-
-  if (!currentLine.empty()) out.push_back(currentLine);
 }
 }  // namespace
 
@@ -163,15 +57,12 @@ void EpubReaderClippingListActivity::onEnter() {
   uiReady = false;
   initialListRender = true;
   applySharedUiTheme(app, uiTarget);
-  app.on(ACTION_ROW, &EpubReaderClippingListActivity::onRowEvent, this);
   app.setScreen(&EpubReaderClippingListActivity::listScreen, this);
   detailText.reserve(CLIPPING_TEXT_MAX);
   detailLines.reserve(32);
   uiItems.resize(CLIPPINGS.clippingCount());
-  // At most 20 reusable 259-byte previews, instead of full text plus a copy per row.
-  for (size_t i = 0; i < std::min(CLIPPINGS.clippingCount(), CLIPPING_WINDOW_SIZE); ++i) {
-    uiLabels[i].reserve(clippingPreview::MAX_BYTES + clippingPreview::ELLIPSIS_BYTES);
-  }
+  previewWindow.invalidate();
+  previewWindow.reserve(CLIPPINGS.clippingCount());
   requestUpdate();
 }
 
@@ -203,6 +94,7 @@ int EpubReaderClippingListActivity::getDetailPageCount() const {
 }
 
 void EpubReaderClippingListActivity::closeDetail() {
+  RenderLock lock(*this);
   detailMode = false;
   detailPage = 0;
   detailText.clear();
@@ -223,19 +115,19 @@ void EpubReaderClippingListActivity::jumpToSelectedClipping() {
 }
 
 void EpubReaderClippingListActivity::openSelectedDetail() {
+  // Serialize the detail read with the render task's batched store read.
+  RenderLock lock(*this);
   if (selectedIndex < 0 || selectedIndex >= static_cast<int>(CLIPPINGS.clippingCount())) return;
 
-  std::string text;
-  text.reserve(CLIPPING_TEXT_MAX);
-  if (!CLIPPINGS.readClippingText(static_cast<size_t>(selectedIndex), text)) {
-    text.clear();
+  if (!CLIPPINGS.readClippingText(static_cast<size_t>(selectedIndex), detailText)) {
+    detailText.clear();
   }
-  buildOneLineSnippetText(text, detailText);
-  detailMode = true;
+  clippingDetail::normalizeInPlace(detailText);
   detailPage = 0;
   detailLayoutWidth = 0;
   detailLinesPerPage = 0;
   rebuildDetailLayoutIfNeeded();
+  detailMode = true;
   requestUpdate();
 }
 
@@ -244,18 +136,23 @@ void EpubReaderClippingListActivity::rebuildDetailLayoutIfNeeded() {
   const int linesPerPage = getDetailLinesPerPage();
   if (textWidth == detailLayoutWidth && linesPerPage == detailLinesPerPage && !detailLines.empty()) return;
 
-  buildWrappedDetailLines(renderer, renderer.filenameFontId(UI_10_FONT_ID), detailText, textWidth, detailLines);
-  if (detailLines.empty()) detailLines.push_back("");
+  const int fontId = renderer.filenameFontId(UI_10_FONT_ID);
+  clippingDetail::wrap(
+      detailText, textWidth, [this, fontId](const char* text) { return renderer.getTextWidth(fontId, text); },
+      detailLines);
+  if (detailLines.empty()) detailLines.emplace_back(0, 0);
   detailLayoutWidth = textWidth;
   detailLinesPerPage = linesPerPage;
   detailPage = std::min(detailPage, getDetailPageCount() - 1);
 }
 
 void EpubReaderClippingListActivity::deleteSelectedClipping() {
+  RenderLock lock(*this);
   if (selectedIndex < 0 || selectedIndex >= static_cast<int>(CLIPPINGS.clippingCount())) return;
 
   if (!CLIPPINGS.removeClippingAt(static_cast<size_t>(selectedIndex))) return;
 
+  previewWindow.invalidate();
   detailMode = false;
   detailText.clear();
   detailLines.clear();
@@ -318,7 +215,7 @@ void EpubReaderClippingListActivity::showClippingActionMenu(const bool ignoreIni
 
 void EpubReaderClippingListActivity::loop() {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, detailMode);
   const Rect header = clippingHeaderRect(renderer, safe, mappedInput);
   if (TouchHeaderBackButton::wasTapped(mappedInput, header)) {
     if (detailMode) {
@@ -393,8 +290,12 @@ void EpubReaderClippingListActivity::loop() {
       showClippingActionMenu(false);
       return;
     }
-    rebuildDetailLayoutIfNeeded();
-    const int detailPageCount = getDetailPageCount();
+    int detailPageCount;
+    {
+      RenderLock lock(*this);
+      rebuildDetailLayoutIfNeeded();
+      detailPageCount = getDetailPageCount();
+    }
     const auto swipe = mappedInput.wasSwipe();
     if (swipe == MappedInputManager::SwipeDir::Up && detailPage < detailPageCount - 1) {
       detailPage++;
@@ -433,12 +334,26 @@ void EpubReaderClippingListActivity::loop() {
     return;
   }
 
-  if (uiReady) {
-    const fui::InputSnapshot snap = touchSnapshotFrom(mappedInput);
-    if (snap.touchPressed || snap.touchReleased) {
-      const auto event = app.route(snap);
-      if (app.invalidated()) requestUpdate();
-      if (event) return;
+  const fui::InputSnapshot snap = touchSnapshotFrom(mappedInput);
+  if (snap.touchPressed || snap.touchReleased) {
+    fui::ActionEvent event;
+    {
+      RenderLock lock(*this);
+      if (uiReady) {
+        event = app.route(snap);
+        if (event) app.clearTapFlash();
+        if (app.invalidated()) requestUpdate();
+      }
+    }
+    // Open the row from the input loop after routing releases the render lock.
+    if (event.action == ACTION_ROW && event.value >= 0 && static_cast<size_t>(event.value) < CLIPPINGS.clippingCount()) {
+      selectedIndex = event.value;
+      if (event.longPress) {
+        showClippingActionMenu(false);
+      } else {
+        openSelectedDetail();
+      }
+      return;
     }
   }
 
@@ -476,26 +391,13 @@ void EpubReaderClippingListActivity::loop() {
   });
 }
 
-void EpubReaderClippingListActivity::onRowEvent(const fui::ActionEvent& event, void* user) {
-  auto* self = static_cast<EpubReaderClippingListActivity*>(user);
-  if (event.value < 0 || event.value >= static_cast<int16_t>(CLIPPINGS.clippingCount())) return;
-  self->selectedIndex = event.value;
-  if (event.longPress) {
-    self->app.clearTapFlash();
-    self->showClippingActionMenu(false);
-    return;
-  }
-  self->app.clearTapFlash();
-  self->openSelectedDetail();
-}
-
 void EpubReaderClippingListActivity::listScreen(UiApp::ScreenType& screen, void* user) {
   static_cast<EpubReaderClippingListActivity*>(user)->buildListScreen(screen);
 }
 
 void EpubReaderClippingListActivity::buildListScreen(UiApp::ScreenType& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer);
   setUiContentMargin(screen, renderer,
                      fui::Insets{static_cast<int16_t>(TouchHeaderBackButton::contentTop(renderer, mappedInput, safe.y)),
                                  static_cast<int16_t>(renderer.getScreenWidth() - safe.x - safe.width),
@@ -513,23 +415,23 @@ void EpubReaderClippingListActivity::buildListScreen(UiApp::ScreenType& screen) 
   props.inputMask = static_cast<uint16_t>(fui::InputTouch | fui::InputLongPress);
   const fui::Rect bounds = screen.body();
   const auto rows = configureUiList(props, screen.theme(), bounds, UiListRowType::WithSubtitle);
-  visibleRows = std::min(rows > 0 ? static_cast<int>(rows) : 1, static_cast<int>(CLIPPING_WINDOW_SIZE));
+  visibleRows = std::min(rows > 0 ? static_cast<int>(rows) : 1, static_cast<int>(ClippingPreviewWindow::CAPACITY));
   topIndex = scrollListBy(topIndex, 0, visibleRows, static_cast<int>(count));
   const int end = std::min({static_cast<int>(count), static_cast<int>(uiItems.size()), topIndex + visibleRows});
+  const int drawCount = std::max(0, end - topIndex);
+  previewWindow.load(CLIPPINGS, static_cast<size_t>(topIndex), static_cast<size_t>(drawCount));
   for (int i = topIndex; i < end; ++i) {
     const size_t slot = static_cast<size_t>(i - topIndex);
-    CLIPPINGS.readClippingPreview(static_cast<size_t>(i), uiLabels[slot]);
     const Clipping* clipping = CLIPPINGS.clippingAt(static_cast<size_t>(i));
     fui::ListItem& item = uiItems[static_cast<size_t>(i)];
     item = fui::ListItem{};
-    item.label = uiLabels[slot].c_str();
+    item.label = previewWindow[slot].c_str();
     if (clipping) item.subtitle = clipping->chapterTitle[0] != '\0' ? clipping->chapterTitle : tr(STR_UNKNOWN_CHAPTER);
     item.actionValue = static_cast<int16_t>(i);
   }
 
   // Keep previews limited to the populated window while giving FreeInkUI the
   // full count so its scroll indicator reflects the whole clipping list.
-  const int drawCount = std::max(0, end - topIndex);
   props.items = uiItems.data() + topIndex;
   props.itemsWindowFirst = static_cast<uint16_t>(topIndex);
   props.itemsWindowCount = static_cast<uint16_t>(drawCount);
@@ -543,8 +445,7 @@ void EpubReaderClippingListActivity::renderDetail() {
   rebuildDetailLayoutIfNeeded();
 
   // Front-button hints move to a different physical edge for each reader
-  // orientation. Keep all detail content inside the same safe area used by
-  // the list view so it cannot render beneath that hint band.
+  // orientation. Reserve that edge while displaying detail controls.
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   const int contentX = safe.x;
   const int contentWidth = safe.width;
@@ -585,8 +486,11 @@ void EpubReaderClippingListActivity::renderDetail() {
   const int firstLine = detailPage * detailLinesPerPage;
   const int lastLine = std::min(static_cast<int>(detailLines.size()), firstLine + detailLinesPerPage);
   int y = textStartY;
+  const int fontId = renderer.filenameFontId(UI_10_FONT_ID);
   for (int i = firstLine; i < lastLine; i++) {
-    renderer.drawText(renderer.filenameFontId(UI_10_FONT_ID), textX, y, detailLines[i].c_str());
+    clippingDetail::withLineText(detailText, detailLines[i], [this, fontId, textX, y](const char* text) {
+      renderer.drawText(fontId, textX, y, text);
+    });
     y += lineStep;
   }
 
@@ -609,7 +513,7 @@ void EpubReaderClippingListActivity::renderDetail() {
   if (showTouchControls) {
     renderer.fillRectDither(openButton.x, openButton.y, openButton.width, openButton.height, Color::White);
     renderer.drawRect(openButton.x, openButton.y, openButton.width, openButton.height, true);
-    const char* label = tr(STR_OPEN);
+    const char* label = tr(STR_GO_TO_TEXT);
     const int labelX =
         openButton.x + (openButton.width - renderer.getTextWidth(UI_10_FONT_ID, label, EpdFontFamily::BOLD)) / 2;
     const int labelY = openButton.y + (openButton.height - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
@@ -618,9 +522,9 @@ void EpubReaderClippingListActivity::renderDetail() {
   }
 #endif
 
-  const auto labels =
-      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_OPEN), detailPage > 0 ? tr(STR_DIR_UP) : "",
-                            detailPage < detailPageCount - 1 ? tr(STR_DIR_DOWN) : "");
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_GO_TO_TEXT),
+                                            detailPage > 0 ? tr(STR_DIR_UP) : "",
+                                            detailPage < detailPageCount - 1 ? tr(STR_DIR_DOWN) : "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
 }
 
@@ -641,8 +545,7 @@ void EpubReaderClippingListActivity::render(RenderLock&&) {
     return;
   }
 
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer);
   const Rect header = clippingHeaderRect(renderer, safe, mappedInput);
   if (mappedInput.hasTouchHardware()) {
     TouchHeaderBackButton::draw(renderer, uiTarget, header, tr(STR_CLIPPINGS), true);
@@ -653,9 +556,5 @@ void EpubReaderClippingListActivity::render(RenderLock&&) {
   renderUiApp(app, uiTarget);
   uiReady = true;
 
-  const auto labels =
-      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), CLIPPINGS.clippingCount() == 0 ? "" : tr(STR_OPEN),
-                            tr(STR_DIR_UP), tr(STR_DIR_DOWN));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
   renderer.displayBuffer();
 }

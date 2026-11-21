@@ -21,6 +21,8 @@
 #include "activities/ActivityManager.h"
 #include "activities/reader/DictionaryWordSelectActivity.h"
 #include "activities/reader/EpubReaderActivity.h"
+#include "components/TouchHeaderBackButton.h"
+#include "components/UITheme.h"
 
 extern ActivityManager activityManager;
 extern GfxRenderer renderer;
@@ -787,8 +789,31 @@ bool ClippingSelectionSmokeTest::tick() {
       const std::string exported{std::istreambuf_iterator<char>(file), {}};
       require(exported.find("\n\n" + text + "\n==========\n") != std::string::npos,
               "Clipping export differs from the authored passage");
-      return true;
+      reader->onReaderMenuConfirm(EpubReaderMenuAction::VIEW_CLIPPINGS);
+      break;
     }
+    case 84: {
+      require(activityManager.isCurrentActivityNamed("EpubClippingList"), "Saved clipping list did not open");
+      auto& theme = UITheme::getInstance();
+      const auto safe = theme.getScreenSafeArea(renderer);
+      x = safe.x + safe.width / 2;
+      y = TouchHeaderBackButton::contentTop(renderer, mappedInputManager, safe.y) + theme.getMetrics().verticalSpacing +
+          theme.getMetrics().listWithSubtitleRowHeight / 2;
+      mappedInputManager.simulatorInjectTouchDown(x, y);
+      break;
+    }
+    case 85:
+      mappedInputManager.simulatorInjectTouchRelease(x, y);
+      break;
+    case 86:
+      capture("clipping-detail");
+      mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Confirm);
+      break;
+    case 87:
+      // Confirm from the list only opens detail. Returning to the reader proves
+      // the preceding touch opened the row and Confirm followed its passage.
+      require(reader, "Tapping the clipping and choosing Go to text did not return to its passage");
+      return true;
   }
   return false;
 }

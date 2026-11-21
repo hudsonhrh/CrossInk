@@ -31,6 +31,8 @@ inline std::string failOpenPath;
 inline std::string failClosePath;
 inline std::string failWritePath;
 inline unsigned parses = 0;
+inline unsigned readOpens = 0;
+inline unsigned closes = 0;
 inline unsigned reads = 0;
 inline unsigned seeks = 0;
 inline unsigned delays = 0;
@@ -64,6 +66,8 @@ inline void reset() {
   failClosePath.clear();
   failWritePath.clear();
   parses = 0;
+  readOpens = 0;
+  closes = 0;
   reads = 0;
   seeks = 0;
   delays = 0;
@@ -75,6 +79,8 @@ inline void reset() {
 }
 
 inline void resetIoCounters() {
+  readOpens = 0;
+  closes = 0;
   reads = 0;
   seeks = 0;
   delays = 0;
@@ -115,6 +121,7 @@ class HalFile {
   explicit operator bool() const { return bool(node); }
   bool isOpen() const { return bool(node); }
   bool close() {
+    if (node) ++fake::closes;
     const bool failed = !fake::failClosePath.empty() && path == fake::failClosePath;
     if (failed) {
       fake::failClosePath.clear();
@@ -250,6 +257,7 @@ class HalStorage {
     return file;
   }
   bool openFileForRead(const char*, const char* path, HalFile& file) {
+    ++fake::readOpens;
     file = open(path);
     return bool(file);
   }

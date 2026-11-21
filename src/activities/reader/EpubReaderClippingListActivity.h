@@ -3,13 +3,13 @@
 #include <FreeInkApp.h>
 #include <FreeInkUIGfxRenderer.h>
 
-#include <array>
 #include <atomic>
 #include <string>
 #include <vector>
 
-#include "ClippingStore.h"
+#include "ClippingPreviewWindow.h"
 #include "activities/Activity.h"
+#include "clippings/ClippingDetailLayout.h"
 #include "util/ButtonNavigator.h"
 
 class EpubReaderClippingListActivity final : public Activity {
@@ -22,7 +22,7 @@ class EpubReaderClippingListActivity final : public Activity {
 
  private:
   std::string detailText;
-  std::vector<std::string> detailLines;
+  std::vector<clippingDetail::Line> detailLines;
   ButtonNavigator buttonNavigator;
   int selectedIndex = 0;
   int detailPage = 0;
@@ -32,19 +32,15 @@ class EpubReaderClippingListActivity final : public Activity {
   bool detailMode = false;
   bool initialListRender = true;
   using UiApp = freeink::ui::FreeInkApp<20, 4>;
-  // Caps the rendered row window: the label buffers below are fixed size, so the
-  // visible-row count from the theme geometry must never exceed them.
-  static constexpr size_t CLIPPING_WINDOW_SIZE = 20;
   freeink::ui::GfxRendererTarget uiTarget;
   UiApp app;
   std::atomic<bool> uiReady{false};
   int visibleRows = 1;
   int topIndex = 0;
   std::vector<freeink::ui::ListItem> uiItems;
-  std::array<std::string, CLIPPING_WINDOW_SIZE> uiLabels;
+  ClippingPreviewWindow previewWindow;
 
   static void listScreen(UiApp::ScreenType& screen, void* user);
-  static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
   void buildListScreen(UiApp::ScreenType& screen);
   int getDetailTextWidth() const;
   int getDetailLinesPerPage() const;
