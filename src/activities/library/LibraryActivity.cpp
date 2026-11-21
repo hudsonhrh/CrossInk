@@ -184,14 +184,17 @@ void LibraryActivity::refreshIndexIfNeeded(const bool showScanning) {
   if (scanCancelledThisVisit) {
     // Respect the cancel until the user asks for a refresh; keep showing
     // whatever index is already on the card.
-    if (!index.isOpen() && !index.open(library::libraryIndexPath()))
-      index.openForReconciliation(library::libraryIndexPath());
+    if (!index.isOpen()) {
+      finishedCache.clear();
+      if (!index.open(library::libraryIndexPath())) index.openForReconciliation(library::libraryIndexPath());
+    }
     uiReady = false;
     applyFilter();
     return;
   }
   // Reuse the index across ordinary visits; still reconcile after cold boots, after
   // file changes, and when the format or metadata setting no longer matches.
+  if (!index.isOpen()) finishedCache.clear();
   if (library::libraryIndexNeedsRefresh() || (!index.isOpen() && !index.open(library::libraryIndexPath())) ||
       index.header().metadataEnabled != static_cast<uint8_t>(SETTINGS.libraryUseMetadata != 0)) {
     rebuildIndex(showScanning);
@@ -210,6 +213,7 @@ bool LibraryActivity::rebuildIndex(const bool showScanning) {
     return true;
   }
   uiReady = false;
+  finishedCache.clear();
   index.close();
   if (showScanning) drawScanScreen(tr(STR_LIBRARY_SCANNING));
   library::BuildStats stats;
@@ -434,7 +438,7 @@ uint16_t LibraryActivity::filteredSourceRow(const uint16_t row) const {
   return UINT16_MAX;
 }
 
-bool LibraryActivity::readBook(const int row, RecentBook& book, const bool fullPath) {
+bool LibraryActivity::readBook(const int row, RecentBook& book) {
   if (sort == Sort::RecentlyRead) {
     const uint16_t historyRow =
         library::recentHistoryRow(row, RECENT_BOOKS.getCount(), recentRows, recentCount, descending);
@@ -446,11 +450,15 @@ bool LibraryActivity::readBook(const int row, RecentBook& book, const bool fullP
     return true;
   }
   library::ClixRecord record{};
-  const auto ordinal = ordinalForRow(row);
+  return readIndexedBook(ordinalForRow(row), record, book, true);
+}
+
+bool LibraryActivity::readIndexedBook(const uint16_t ordinal, library::ClixRecord& record, RecentBook& book,
+                                      const bool fullPath) {
   if (ordinal == UINT16_MAX || !index.readRecord(ordinal, record) ||
       !index.readDisplayText(record, book.title, book.author) ||
       !(fullPath ? index.readPath(record, book.path) : index.readName(record, book.path))) {
-    LOG_ERR("LIB", "Cannot read book row %d", row);
+    LOG_ERR("LIB", "Cannot read indexed book %u", ordinal);
     return false;
   }
   return true;
@@ -619,8 +627,8 @@ void LibraryActivity::openDialog(std::unique_ptr<Activity>&& child, ActivityResu
     ignoreConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
     confirmLongPressCaptured = false;
     uiReady = false;
-    handler(result);
     finishedCache.clear();
+    handler(result);
     requestUpdate();
   });
 }
@@ -897,7 +905,7 @@ void LibraryActivity::loop() {
     return;
   }
   // Prepare at most one cover between input checks, then repaint the completed page.
-  loadGridPageCovers();
+  if (!pendingCacheDeletedFeedback && gridEnabled()) loadGridPageCovers();
 }
 
 void LibraryActivity::handleInput(const LibraryInputBuffer::Event& input) {
@@ -1051,47 +1059,15 @@ void LibraryActivity::handleInput(const LibraryInputBuffer::Event& input) {
   }
 }
 
-bool LibraryActivity::isFinishedRow(const int row) {
-  // Every recent row passed the same read-only check when the filter was built.
-  if (sort == Sort::RecentlyRead && SETTINGS.libraryHideFinishedBooks) return false;
-  // Rows are drawn with only the file name (or the full path for recents).
-  if (rowScratch.path.empty() || UITheme::getFileIcon(rowScratch.path) != UIIcon::Book) return false;
-  const bool recentRow = sort == Sort::RecentlyRead;
-  library::ClixRecord record{};
-  uint32_t key = 0;
-  if (recentRow) {
-    key = static_cast<uint32_t>(std::hash<std::string>{}(rowScratch.path));
-  } else {
-    uint64_t pathHash = 0;
-    const uint16_t ordinal = ordinalForRow(row);
-    if (ordinal == UINT16_MAX || !index.readRecord(ordinal, record) || !index.readPathHash(record, pathHash)) {
-      return false;
-    }
-    key = static_cast<uint32_t>(pathHash ^ (pathHash >> 32));
-  }
-  bool finished = false;
-  if (finishedCache.lookup(key, finished)) return finished;
-
-  if (recentRow) {
-    finished = BookActions::isBookCompletedForList(rowScratch.path);
-  } else {
-    std::string fullPath;
-    if (!index.readPath(record, fullPath)) {
-      LOG_ERR("LIB", "Cannot read Library book path");
-      finishedCache.store(key, false);  // log once, not on every render
-      return false;
-    }
-    finished = BookActions::isBookCompletedForList(fullPath);
-  }
-  finishedCache.store(key, finished);
-  return finished;
+static uint32_t recentFinishedKey(const std::string& path) {
+  return static_cast<uint32_t>(std::hash<std::string>{}(path)) | (uint32_t{1} << 31);
 }
 
 void LibraryActivity::onFrontlightPanelClosed() {
   // The panel's Reading Stats page can set or clear a book's finished date.
   // ActivityManager calls this while it already holds the render lock.
   finishedCache.clear();
-  if (sort == Sort::RecentlyRead && SETTINGS.libraryHideFinishedBooks) {
+  if (SETTINGS.libraryHideFinishedBooks) {
     reloadAfterBookAction();
     return;
   }
@@ -1104,19 +1080,20 @@ void LibraryActivity::listScreen(UiApp::ScreenType& screen, void* user) {
 
 void LibraryActivity::provideRow(void* user, const uint16_t row, fui::ListItem& item) {
   auto* self = static_cast<LibraryActivity*>(user);
-  if (!self->readBook(row, self->rowScratch, false)) {
+  const bool recent = self->sort == Sort::RecentlyRead;
+  const uint16_t ordinal = recent ? UINT16_MAX : self->ordinalForRow(row);
+  library::ClixRecord record{};
+  const bool available = recent ? self->readBook(row, self->rowScratch)
+                                : self->readIndexedBook(ordinal, record, self->rowScratch, false);
+  if (!available) {
     item.label = tr(STR_LIBRARY_UNAVAILABLE);
     item.enabled = false;
     return;
   }
   item.label = self->rowScratch.title.c_str();
   if (!self->rowScratch.author.empty()) item.subtitle = self->rowScratch.author.c_str();
-  if (self->sort != Sort::RecentlyRead && SETTINGS.libraryUseMetadata &&
-      (SETTINGS.libraryShowSeries || SETTINGS.libraryShowGenre)) {
-    library::ClixRecord record{};
-    const uint16_t ordinal = self->ordinalForRow(row);
-    if (ordinal != UINT16_MAX && self->index.readRecord(ordinal, record) &&
-        self->index.readSeries(record, self->seriesScratch) && self->index.readGenre(record, self->genreScratch) &&
+  if (!recent && SETTINGS.libraryUseMetadata && (SETTINGS.libraryShowSeries || SETTINGS.libraryShowGenre)) {
+    if (self->index.readSeries(record, self->seriesScratch) && self->index.readGenre(record, self->genreScratch) &&
         ((SETTINGS.libraryShowSeries && !self->seriesScratch.empty()) ||
          (SETTINGS.libraryShowGenre && !self->genreScratch.empty()))) {
       self->subtitleScratch = self->rowScratch.author;
@@ -1135,7 +1112,23 @@ void LibraryActivity::provideRow(void* user, const uint16_t row, fui::ListItem& 
       item.subtitle = self->subtitleScratch.c_str();
     }
   }
-  const UIIcon icon = self->isFinishedRow(row) ? UIIcon::BookCheck : UITheme::getFileIcon(self->rowScratch.path);
+  UIIcon icon = self->rowScratch.path.empty() ? UIIcon::File : UITheme::getFileIcon(self->rowScratch.path);
+  if (!SETTINGS.libraryHideFinishedBooks && icon == UIIcon::Book) {
+    auto& path = self->rowScratch.path;
+    const uint32_t key = recent ? recentFinishedKey(path) : ordinal;
+    bool finished = false;
+    if (!self->finishedCache.lookup(key, finished)) {
+      // The filename has already been used to choose the icon, so the same
+      // field can hold the full path on a cache miss.
+      if (recent || self->index.readPath(record, path)) {
+        finished = BookActions::isBookCompletedForList(path);
+      } else {
+        LOG_ERR("LIB", "Cannot read Library book path at row %u", row);
+      }
+      self->finishedCache.store(key, finished);
+    }
+    if (finished) icon = UIIcon::BookCheck;
+  }
   item.icon = listIconFor(icon, 32);
   item.actionValue = static_cast<int16_t>(row);
   if (!SETTINGS.libraryListExpanded) return;
@@ -1358,6 +1351,7 @@ void LibraryActivity::buildListScreen(UiApp::ScreenType& screen) {
   listNav.top = topIndex;
   listNav.syncToProps(screen.body(), props.rowHeight, props.rowGap, rowCount(), props);
   topIndex = listNav.top;
+  finishedCache.beginFrame();
   {
     FilenameUiFontScope fonts(uiTarget, renderer);
     screen.list(props);
@@ -1673,10 +1667,17 @@ void LibraryActivity::showBookActionMenu(const size_t bookIndex, const bool igno
                    requestUpdate();
                    return;
                  }
-                 case FileBrowserAction::ReadingStats:
-                   openDialog(BookActions::createReadingStatsActivity(renderer, mappedInput, book.path, book.title),
-                              [this](const ActivityResult&) { requestUpdate(); });
+                 case FileBrowserAction::ReadingStats: {
+                   // Global stats can walk the cache directory and open the index as an entry.
+                   index.close();
+                   auto stats = BookActions::createReadingStatsActivity(renderer, mappedInput, book.path, book.title);
+                   if (stats) {
+                     openDialog(std::move(stats), [this](const ActivityResult&) { reloadAfterBookAction(); });
+                   } else {
+                     reloadAfterBookAction();
+                   }
                    return;
+                 }
                  case FileBrowserAction::Delete:
                    promptDeleteBook(book);
                    return;
@@ -1729,6 +1730,8 @@ void LibraryActivity::showBookActionMenu(const size_t bookIndex, const bool igno
                               });
                    return;
                  case FileBrowserAction::ToggleCompleted: {
+                   // Global stats may walk the cache directory while confirming a missing snapshot.
+                   index.close();
                    bool completed = false;
                    if (BookActions::toggleBookCompleted(book.path, book.title, completed)) {
                      BookActions::drawToast(renderer, completed ? tr(STR_MARKED_FINISHED) : tr(STR_MARKED_UNFINISHED));

@@ -213,17 +213,323 @@ TEST_F(LibraryBuilderTest, DevelopmentVersionEightRebuildPreservesArrivalHistory
 }
 
 TEST_F(LibraryBuilderTest, UnchangedRebuildReusesMetadataAndDoesNotReplaceIndex) {
+  fake::add("/new/notes.txt");
+  bookMetadata["/a.epub"].series = "Earthsea";
+  bookMetadata["/a.epub"].seriesIndex = "2.5";
+  bookMetadata["/a.epub"].genre = "Fantasy";
+  bookMetadata["/b.epub"].title.clear();
+  bookMetadata["/b.epub"].author.clear();
   initial();
   const auto old = fake::files[INDEX]->bytes;
+  fake::add("/.hidden.epub");
   fake::parses = 0;
+  fake::resetIoCounters();
 
   ASSERT_TRUE(buildLibraryIndex("/", stats, true));
 
   EXPECT_EQ(fake::parses, 0u);
   EXPECT_EQ(stats.parsed, 0);
-  EXPECT_EQ(stats.metadataReused, 2);
+  EXPECT_EQ(stats.metadataReused, 3);
+  EXPECT_EQ(stats.enriched, 1);
   EXPECT_FALSE(stats.indexReplaced);
   EXPECT_EQ(fake::files[INDEX]->bytes, old);
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+}
+
+TEST_F(LibraryBuilderTest, FilenameOnlyInventorySkipsAllScratchWrites) {
+  fake::add("/nested/c.txt");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  const auto live = fake::files[INDEX];
+  // A same-length edit to contents cannot change a filename-only row, even
+  // if its timestamp still sits in the same FAT tick. Hidden books stay out.
+  fake::files["/a.epub"]->bytes[0] ^= 1;
+  fake::add("/.hidden.epub");
+  fake::add("/nested/.hidden/notes.txt");
+  fake::add("/fonts/notes.txt");
+  fake::add("/nested/empty/ignore.dat");
+  fake::resetIoCounters();
+
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  EXPECT_EQ(stats.books, 3);
+  EXPECT_EQ(stats.folders, 2);
+  EXPECT_EQ(stats.unchanged, 3);
+  EXPECT_EQ(stats.metadataReused, 3);
+  EXPECT_FALSE(stats.indexReplaced);
+  EXPECT_EQ(fake::files[INDEX], live);
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+  EXPECT_TRUE(fake::writesByPath.empty());
+  EXPECT_EQ(fake::successfulRenames, 0u);
+  EXPECT_EQ(fake::successfulRemovals, 0u);
+}
+
+TEST_F(LibraryBuilderTest, SameFatTickOverwriteAgreesWithStagedMetadataReuse) {
+  fake::add("/same.epub", "aaaa", 7);
+  bookMetadata["/same.epub"].title = "Before";
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  const auto live = fake::files[INDEX];
+  fake::files["/same.epub"]->bytes[0] = 'b';
+  bookMetadata["/same.epub"].title = "After";
+  fake::resetIoCounters();
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+  EXPECT_FALSE(stats.indexReplaced);
+  EXPECT_EQ(stats.parsed, 0);
+  EXPECT_EQ(fake::files[INDEX], live);
+  const auto verified = stats;
+
+  // Force the original staged path on the same inventory and prove the
+  // coarse FAT identity limitation is shared by both branches.
+  fake::failAlloc = 1;  // Inventory lookup, immediately after the name buffer.
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_TRUE(fake::failureTriggered);
+  EXPECT_GT(fake::writesByPath["/.crosspoint/library.stage"], 0u);
+  EXPECT_FALSE(stats.indexReplaced);
+  EXPECT_EQ(stats.parsed, verified.parsed);
+  EXPECT_EQ(stats.metadataReused, verified.metadataReused);
+  EXPECT_EQ(stats.enriched, verified.enriched);
+  EXPECT_EQ(fake::files[INDEX], live);
+  {
+    LibraryIndexFile index;
+    ASSERT_TRUE(index.open(INDEX));
+    ClixRecord record{};
+    ASSERT_TRUE(recordAtPath(index, "/same.epub", record));
+    std::string title;
+    ASSERT_TRUE(index.readTitle(record, title));
+    EXPECT_EQ(title, "Before");
+  }
+
+  // Once the filesystem signals the change, the staged reconciler must
+  // honor it even though the size and name are unchanged.
+  ++fake::files["/same.epub"]->time;
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_TRUE(stats.indexReplaced);
+  EXPECT_EQ(stats.parsed, 1);
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  ClixRecord record{};
+  ASSERT_TRUE(recordAtPath(index, "/same.epub", record));
+  std::string title;
+  ASSERT_TRUE(index.readTitle(record, title));
+  EXPECT_EQ(title, "After");
+}
+
+TEST_F(LibraryBuilderTest, InventoryRetriesFailedEpubExtractionWithLiveIndex) {
+  bookMetadata["/a.epub"].success = false;
+  initial();
+  bookMetadata["/a.epub"] = {.title = "Retried"};
+  fake::resetIoCounters();
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_TRUE(stats.indexReplaced);
+  EXPECT_EQ(stats.parsed, 1);
+  EXPECT_EQ(stats.metadataReused, 1);
+  EXPECT_GT(fake::writesByPath["/.crosspoint/library.stage"], 0u);
+
+  fake::resetIoCounters();
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_FALSE(stats.indexReplaced);
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  ClixRecord record{};
+  ASSERT_TRUE(recordAtPath(index, "/a.epub", record));
+  EXPECT_EQ(record.metadataStatus, CLIX_METADATA_EXTRACTED);
+  std::string title;
+  ASSERT_TRUE(index.readTitle(record, title));
+  EXPECT_EQ(title, "Retried");
+}
+
+TEST_F(LibraryBuilderTest, InventoryRejectsUnreadableRetainedMetadata) {
+  fake::files.erase("/b.epub");
+  initial();
+  const auto live = fake::files[INDEX];
+  fake::resetIoCounters();
+  // Header, lookup record and hash, match record and creation time, folder
+  // length and path, basename, then the retained metadata.
+  fake::failRead = 8;
+  EXPECT_FALSE(buildLibraryIndex("/", stats, true));
+  EXPECT_TRUE(fake::failureTriggered);
+  EXPECT_EQ(stats.failure, BuildFailure::Error);
+  EXPECT_EQ(fake::files[INDEX], live);
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+  EXPECT_TRUE(libraryIndexNeedsRefresh());
+
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+
+  ClixHeader header{};
+  ClixRecord first{};
+  memcpy(&header, live->bytes.data(), sizeof(header));
+  memcpy(&first, live->bytes.data() + recordOffset(header, 0), sizeof(first));
+  live->bytes[header.nameStart + first.nameOff + sizeof(uint64_t) + first.nameLen] = 0xFF;
+  EXPECT_FALSE(buildLibraryIndex("/", stats, true));
+  EXPECT_EQ(stats.failure, BuildFailure::Error);
+  EXPECT_EQ(fake::files[INDEX], live);
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+}
+
+TEST_F(LibraryBuilderTest, LargeMixedInventoryUsesPsramAndFallsBackWhenUnavailable) {
+  for (unsigned i = 0; i < 1023; ++i) {
+    const auto path = "/shelf" + numbered("", i / 4) + "/" + numbered("book", i) + (i % 2 ? ".epub" : ".txt");
+    fake::add(path);
+  }
+  initial();
+  ASSERT_EQ(stats.books, 1025);
+  const auto live = fake::files[INDEX];
+
+  fake::resetIoCounters();
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_GT(fake::writesByPath["/.crosspoint/library.stage"], 0u);
+  EXPECT_EQ(fake::files[INDEX], live);
+
+  fake::psram = true;
+  fake::resetIoCounters();
+  fake::failAlloc = 1;  // Failed PSRAM lookup must go to staging, not internal RAM.
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_TRUE(fake::failureTriggered);
+  EXPECT_GT(fake::writesByPath["/.crosspoint/library.stage"], 0u);
+  EXPECT_EQ(fake::files[INDEX], live);
+
+  fake::resetIoCounters();
+  fake::psramAllocations = 0;
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_EQ(stats.metadataReused, 1025);
+  EXPECT_EQ(stats.parsed, 0);
+  EXPECT_EQ(fake::files[INDEX], live);
+  EXPECT_EQ(fake::psramAllocations, 2u);  // Inventory table and folder checkpoints.
+  EXPECT_LE(fake::reads, 8u * 1025 + stats.folders + 1);
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+}
+
+TEST_F(LibraryBuilderTest, FilenameOnlyInventoryDefersUnknownAndChangedTimes) {
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  fake::files["/a.epub"]->time = 0;
+  fake::resetIoCounters();
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  EXPECT_TRUE(stats.indexReplaced);
+  EXPECT_GT(fake::writesByPath["/.crosspoint/library.stage"], 0u);
+  fake::resetIoCounters();
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  EXPECT_TRUE(stats.indexReplaced);
+  EXPECT_GT(fake::writesByPath["/.crosspoint/library.stage"], 0u);
+
+  fake::files["/a.epub"]->time = 1;
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  fake::files["/a.epub"]->created = 0;
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  EXPECT_TRUE(stats.indexReplaced);
+  fake::resetIoCounters();
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+}
+
+TEST_F(LibraryBuilderTest, InventoryDoesNotAcceptDuplicatePathAsAnUnseenBook) {
+  fake::add("/books/a.txt");
+  fake::add("/different/b.txt");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  ASSERT_TRUE(Storage.removeDir("/different"));
+  fake::duplicateDirectoryEntry("/books");
+  fake::resetIoCounters();
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  EXPECT_GT(fake::writesByPath["/.crosspoint/library.stage"], 0u);
+  EXPECT_TRUE(stats.indexReplaced);
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  ClixRecord record{};
+  EXPECT_FALSE(recordAtPath(index, "/different/b.txt", record));
+}
+
+TEST_F(LibraryBuilderTest, InventoryAllocationFailureFallsBackToStagedReconciliation) {
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  const auto live = fake::files[INDEX];
+  fake::resetIoCounters();
+  fake::failAlloc = 1;  // Inventory scratch after the name buffer.
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  EXPECT_TRUE(fake::failureTriggered);
+  EXPECT_GT(fake::writesByPath["/.crosspoint/library.stage"], 0u);
+  EXPECT_EQ(fake::files[INDEX], live);
+  EXPECT_FALSE(libraryIndexNeedsRefresh());
+}
+
+TEST_F(LibraryBuilderTest, RenameAndDeleteAfterInventoryMissPreserveArrivalHistory) {
+  fake::add("/folder/a.txt", "renamed-book");
+  fake::add("/folder/b.txt", "delete");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  ClixRecord before{};
+  ASSERT_TRUE(recordAtPath(index, "/folder/a.txt", before));
+  index.close();
+
+  ASSERT_TRUE(Storage.rename("/folder/a.txt", "/folder/moved.txt"));
+  ASSERT_TRUE(Storage.remove("/folder/b.txt"));
+  fake::resetIoCounters();
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  EXPECT_TRUE(stats.indexReplaced);
+  EXPECT_EQ(stats.renamed, 1u);
+  EXPECT_EQ(stats.removed, 1u);
+  EXPECT_GT(fake::writesByPath["/.crosspoint/library.stage"], 0u);
+  ASSERT_TRUE(index.open(INDEX));
+  EXPECT_EQ(index.bookCount(), 3u);
+  ClixRecord after{};
+  ASSERT_TRUE(recordAtPath(index, "/folder/moved.txt", after));
+  EXPECT_EQ(after.firstSeen, before.firstSeen);
+  EXPECT_FALSE(recordAtPath(index, "/folder/a.txt", after));
+  EXPECT_FALSE(recordAtPath(index, "/folder/b.txt", after));
+}
+
+TEST_F(LibraryBuilderTest, InventoryReadAndDirectoryFailuresKeepLiveIndexWithoutStaging) {
+  fake::add("/nested/c.txt");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  const auto live = fake::files[INDEX];
+  fake::resetIoCounters();
+  // Header, two records and two hashes, third record and hash, then fail
+  // reading the first folder checkpoint.
+  fake::failRead = 7;
+  EXPECT_FALSE(buildLibraryIndex("/", stats, false));
+  EXPECT_TRUE(fake::failureTriggered);
+  EXPECT_EQ(stats.failure, BuildFailure::Error);
+  EXPECT_TRUE(libraryIndexNeedsRefresh());
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+  EXPECT_EQ(fake::files[INDEX], live);
+
+  fake::failDirectoryIterationPath = "/nested";
+  EXPECT_FALSE(buildLibraryIndex("/", stats, false));
+  EXPECT_EQ(stats.failure, BuildFailure::Error);
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+  EXPECT_EQ(fake::files[INDEX], live);
+
+  fake::failClosePath = "/a.epub";
+  EXPECT_FALSE(buildLibraryIndex("/", stats, false));
+  EXPECT_EQ(stats.failure, BuildFailure::Error);
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+  EXPECT_EQ(fake::files[INDEX], live);
+
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+  EXPECT_FALSE(libraryIndexNeedsRefresh());
+}
+
+TEST_F(LibraryBuilderTest, InventoryRecoversPreviousLiveIndexBeforeDecidingUnchanged) {
+  constexpr char BACKUP[] = "/.crosspoint/library.bak";
+  constexpr char NEW[] = "/.crosspoint/library.new";
+  initial();
+  const auto live = fake::files[INDEX];
+  ASSERT_TRUE(Storage.rename(INDEX, BACKUP));
+  fake::add(NEW, "partial stage");
+  fake::resetIoCounters();
+
+  fake::failRename = 0;
+  EXPECT_FALSE(buildLibraryIndex("/", stats, true));
+  EXPECT_FALSE(Storage.exists(INDEX));
+  EXPECT_EQ(fake::files[BACKUP], live);
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_EQ(fake::files[INDEX], live);
+  EXPECT_FALSE(Storage.exists(BACKUP));
+  EXPECT_FALSE(stats.indexReplaced);
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+  EXPECT_EQ(fake::successfulRenames, 1u);
 }
 
 TEST_F(LibraryBuilderTest, MissingModificationDateClearsDerivedCacheThroughStatePreservingPath) {
@@ -1266,6 +1572,41 @@ TEST_F(LibraryBuilderTest, InvalidationDuringScanSurvivesSuccessfulPublish) {
   EXPECT_FALSE(libraryIndexNeedsRefresh());
 }
 
+TEST_F(LibraryBuilderTest, MutationDuringAnUnchangedInventoryLeavesReconciliationPending) {
+  for (unsigned i = 0; i < 65; ++i) fake::add("/book" + numbered("", i) + ".txt");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  const auto live = fake::files[INDEX];
+  fake::resetIoCounters();
+  fake::directoryEntriesByPath.clear();
+  // Once the directory walk has passed a.epub, simulate a writer changing it
+  // and notifying the builder. The scan cannot make a filesystem snapshot.
+  fake::onService = [] {
+    if (fake::directoryEntriesByPath["/a.epub"] == 0) return;
+    fake::files["/a.epub"]->time++;
+    bookMetadata["/a.epub"].title = "Edited during scan";
+    invalidateLibraryIndex();
+    fake::onService = nullptr;
+  };
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_FALSE(stats.indexReplaced);
+  EXPECT_EQ(fake::files[INDEX], live);
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+  EXPECT_TRUE(libraryIndexNeedsRefresh());
+
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_TRUE(stats.indexReplaced);
+  EXPECT_EQ(stats.parsed, 1);
+  EXPECT_EQ(preservedCacheClears, std::vector<std::string>{"/a.epub"});
+  EXPECT_FALSE(libraryIndexNeedsRefresh());
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  ClixRecord record{};
+  ASSERT_TRUE(recordAtPath(index, "/a.epub", record));
+  std::string title;
+  ASSERT_TRUE(index.readTitle(record, title));
+  EXPECT_EQ(title, "Edited during scan");
+}
+
 TEST_F(LibraryBuilderTest, EmptyLibraryStillRecordsMetadataModeChanges) {
   fake::files.erase("/a.epub");
   fake::files.erase("/b.epub");
@@ -1335,6 +1676,42 @@ TEST_F(LibraryBuilderTest, CancelledScanKeepsPreviousIndexAndSaysWhy) {
   ASSERT_TRUE(buildLibraryIndex("/", stats, true));
   EXPECT_EQ(stats.failure, BuildFailure::None);
   EXPECT_EQ(stats.books, 42);
+}
+
+TEST_F(LibraryBuilderTest, CancellingInventoryKeepsPreviousIndexWithoutStaging) {
+  for (unsigned i = 0; i < 65; ++i) fake::add("/book" + numbered("", i) + ".txt");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  const auto live = fake::files[INDEX];
+  fake::resetIoCounters();
+  BuildProbe probe;
+  probe.cancelAfterParses = 0;
+  const BuildCallbacks callbacks = probe.callbacks();
+  EXPECT_FALSE(buildLibraryIndex("/", stats, false, &callbacks));
+  EXPECT_EQ(stats.failure, BuildFailure::Cancelled);
+  EXPECT_FALSE(probe.sawOrganizing);
+  EXPECT_EQ(fake::files[INDEX], live);
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+  EXPECT_TRUE(libraryIndexNeedsRefresh());
+}
+
+TEST_F(LibraryBuilderTest, CancellingFolderCheckpointsStopsBeforeInventoryWalk) {
+  for (unsigned i = 0; i < 96; ++i) fake::add("/folder" + numbered("", i) + "/book.txt");
+  initial();
+  const auto live = fake::files[INDEX];
+  fake::resetIoCounters();
+  fake::directoryEntriesByPath.clear();
+  unsigned readsBeforeFolders = 1 + 2 * stats.books;
+  BuildCallbacks callbacks;
+  callbacks.context = &readsBeforeFolders;
+  callbacks.cancelRequested = [](void* context) {
+    return fake::reads > *static_cast<const unsigned*>(context);
+  };
+  EXPECT_FALSE(buildLibraryIndex("/", stats, true, &callbacks));
+  EXPECT_EQ(stats.failure, BuildFailure::Cancelled);
+  EXPECT_GT(fake::reads, readsBeforeFolders);
+  EXPECT_TRUE(fake::directoryEntriesByPath.empty());
+  EXPECT_TRUE(fake::writeOpensByPath.empty());
+  EXPECT_EQ(fake::files[INDEX], live);
 }
 
 TEST_F(LibraryBuilderTest, ProgressReportsBooksFoundAndTheOrganizingPhase) {

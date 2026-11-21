@@ -104,12 +104,18 @@ class LibraryIndexFile {
   bool readGenre(const ClixRecord& record, std::string& out);
   // V6 sortable signed float bits; UINT32_MAX means no usable order.
   bool readSeriesPosition(const ClixRecord& record, uint32_t& out);
+  // Verify all five length-prefixed fields and the series position in one read.
+  // The current-format row ends at the next name offset, or the section's end.
+  // Scratch must hold INVENTORY_METADATA_BYTES and can be reused across rows.
+  static constexpr size_t INVENTORY_METADATA_BYTES = 5 * (1 + UINT8_MAX) + sizeof(uint32_t);
+  bool verifyInventoryMetadata(const ClixRecord& record, uint32_t nameEnd, uint8_t* scratch, bool& enriched);
 
   // Absolute path of the book, rebuilt from its folder record.
   bool readPath(const ClixRecord& record, std::string& out);
   // A small, caller-owned offset table bounds folder walks during full-library scans.
   static constexpr uint16_t FOLDER_CHECKPOINT_COUNT = 128;
-  bool buildFolderCheckpoints(uint32_t* offsets, uint16_t& stride);
+  bool buildFolderCheckpoints(uint32_t* offsets, uint16_t& stride, uint16_t checkpointCount = FOLDER_CHECKPOINT_COUNT,
+                              bool (*keepGoing)() = nullptr);
   bool readPath(const ClixRecord& record, std::string& out, const uint32_t* offsets, uint16_t stride);
 
  private:

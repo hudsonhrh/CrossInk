@@ -1,17 +1,16 @@
 #pragma once
 
-// Builds the CLX1 index by walking the SD card once.
+// Reconciles the CLX1 index with the SD card.
 //
 // The walk derives filename fallbacks and can read title, author, series/order, and subject metadata from
 // EPUBs. Fresh metadata is reused from the previous index.
 //
 // Shape of the build, and why:
 //
-//   * ONE walk. Records go straight into a staging file in discovery order, so
-//     nothing proportional to the library stays resident. The previous index is
-//     matched through a sorted file with a small in-RAM fence, and every order
-//     is sorted in bounded runs (LibrarySort.h) whose buffer is the only sizable
-//     allocation after the walk: 32 KiB on the C3, the whole sort in PSRAM.
+//   * A bounded read-only walk can keep an unchanged index with reusable metadata.
+//   * A staged walk writes records in discovery order. It matches the previous
+//     index through a sorted file with a small in-RAM fence. Each display order
+//     is sorted in bounded runs (LibrarySort.h), up to 32 KiB on the C3.
 //   * Duplicate directory entries are dropped. A damaged FAT can hand the same
 //     file out twice, and without this the shelf shows phantom books that
 //     cannot be opened.

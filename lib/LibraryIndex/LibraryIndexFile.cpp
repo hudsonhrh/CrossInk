@@ -358,17 +358,49 @@ bool LibraryIndexFile::readSeriesPosition(const ClixRecord& record, uint32_t& ou
   return at <= head.nameLen && sizeof(out) <= head.nameLen - at && readAt(head.nameStart + at, &out, sizeof(out));
 }
 
+bool LibraryIndexFile::verifyInventoryMetadata(const ClixRecord& record, const uint32_t nameEnd, uint8_t* scratch,
+                                               bool& enriched) {
+  enriched = false;
+  if (!opened || head.formatVersion != CLIX_FORMAT_VERSION || nameEnd > head.nameLen || record.nameOff > nameEnd)
+    return false;
+  const uint32_t prefix = sizeof(uint64_t) + record.nameLen;
+  if (prefix > nameEnd - record.nameOff) return false;
+  const uint32_t bytes = nameEnd - record.nameOff - prefix;
+  constexpr uint32_t fieldCount = 5;
+  constexpr uint32_t emptyBytes = fieldCount + sizeof(uint32_t);
+  const bool filenameOnly = record.metadataStatus == CLIX_METADATA_NOT_ATTEMPTED;
+  if (bytes < emptyBytes || bytes > INVENTORY_METADATA_BYTES || (filenameOnly && bytes != emptyBytes) ||
+      !readAt(head.nameStart + record.nameOff + prefix, scratch, bytes))
+    return false;
+
+  const uint32_t fieldsEnd = bytes - sizeof(uint32_t);
+  uint32_t at = 0;
+  for (uint32_t field = 0; field < fieldCount; ++field) {
+    if (at >= fieldsEnd) return false;
+    const uint8_t length = scratch[at++];
+    if (length > fieldsEnd - at) return false;
+    if ((field == 1 || field == 2) && length > 0) enriched = true;  // Book title or source author.
+    at += length;
+  }
+  if (at != fieldsEnd) return false;
+  uint32_t seriesPosition = 0;
+  memcpy(&seriesPosition, scratch + at, sizeof(seriesPosition));
+  return !filenameOnly || seriesPosition == CLIX_UNKNOWN_SERIES_POSITION;
+}
+
 bool LibraryIndexFile::readPath(const ClixRecord& record, std::string& out) {
   return readPath(record, out, nullptr, 0);
 }
 
-bool LibraryIndexFile::buildFolderCheckpoints(uint32_t* offsets, uint16_t& stride) {
+bool LibraryIndexFile::buildFolderCheckpoints(uint32_t* offsets, uint16_t& stride, const uint16_t checkpointCount,
+                                             bool (*keepGoing)()) {
   stride = 0;
-  if (!opened || !offsets || head.folderCount == 0) return false;
-  stride = (head.folderCount + FOLDER_CHECKPOINT_COUNT - 1) / FOLDER_CHECKPOINT_COUNT;
+  if (!opened || !offsets || head.folderCount == 0 || checkpointCount == 0) return false;
+  stride = (head.folderCount + checkpointCount - 1) / checkpointCount;
   uint32_t offset = head.folderStart;
   const uint32_t folderEnd = head.folderStart + head.folderLen;
   for (uint32_t i = 0; i < head.folderCount; ++i) {
+    if (keepGoing && !keepGoing()) return false;
     if (offset >= folderEnd) return false;
     if (i % stride == 0) offsets[i / stride] = offset;
     uint8_t pathLen = 0;

@@ -521,8 +521,26 @@ uint16_t takeFirstSeen(uint16_t& next) {
   return FIRST_SEEN_LAST;
 }
 
-// State threaded through the recursive walk. Passed by reference rather than
-// captured, so the walk stays a plain function and its stack frame stays small.
+struct InventoryEntry {
+  uint64_t pathHash;
+  uint32_t nameEnd;
+  uint16_t ordinal;
+  bool claimed;
+};
+static_assert(sizeof(InventoryEntry) <= 16);
+// Cap the lookup at 16 KiB in internal RAM. Larger indexes can use up to
+// CLIX_MAX_RECORDS * sizeof(InventoryEntry) in PSRAM only.
+constexpr uint16_t INVENTORY_BOOK_LIMIT = 1024;
+
+struct InventoryProbe {
+  InventoryEntry* entries = nullptr;
+  uint8_t* metadata = nullptr;
+  const uint32_t* folderOffsets = nullptr;
+  uint16_t folderStride = 0;
+  bool mismatch = false;
+};
+
+// Shared by the read-only inventory check and the staging walk.
 struct WalkState {
   HalFile stage;
   serialization::BufferedFileWriter* stageOut = nullptr;
@@ -541,6 +559,7 @@ struct WalkState {
   bool creationTimesUnchanged = true;
   bool readMetadata = false;
   LibraryIndexFile* previous = nullptr;
+  InventoryProbe* probe = nullptr;
   // Parses kept across cancelled or failed builds; null when metadata is off.
   LibraryMetadataCache* metadataCache = nullptr;
   BuildStats* stats = nullptr;
@@ -552,7 +571,55 @@ struct WalkState {
   uint16_t reused = 0;
   uint16_t unresolved = 0;  // matched no path; renamed or new, decided after the walk
   uint32_t serviceUnits = 0;
+
+  bool stopped() const { return failed || (probe && probe->mismatch); }
 };
+
+// Share the staged reuse policy. In particular an equal-length overwrite
+// inside one FAT timestamp tick has the same result in either path.
+bool canReuseMetadata(const ClixHeader& header, const ClixRecord& prior, const uint64_t fileSize,
+                      const uint32_t modificationTime, const bool readMetadata, const bool extractionExpected) {
+  const uint8_t expectedStatus = extractionExpected ? CLIX_METADATA_EXTRACTED : CLIX_METADATA_NOT_ATTEMPTED;
+  return prior.fileSize == fileSize && modificationTime != 0 && prior.modificationTime == modificationTime &&
+         header.formatVersion >= 3 && header.metadataEnabled == readMetadata && prior.metadataStatus == expectedStatus &&
+         (!extractionExpected || header.formatVersion >= 7);
+}
+
+// Hashes locate candidates only. Exact paths and one claim per ordinal prevent
+// a hash collision or repeated directory entry from hiding an add/delete.
+// Keep the prior record off the recursive walk's stack frame.
+[[gnu::noinline]] bool verifyInventoryBook(WalkState& st, const std::string& path, const uint64_t size,
+                                           const uint32_t created, const uint32_t modified,
+                                           const bool extractMetadata) {
+  if (modified == 0 || st.books == st.previous->bookCount()) return false;
+
+  const uint64_t hash = clixPathHash(path.data(), path.size());
+  InventoryEntry* const end = st.probe->entries + st.previous->bookCount();
+  auto* entry = std::lower_bound(st.probe->entries, end, hash, [](const InventoryEntry& candidate, uint64_t key) {
+    return candidate.pathHash < key;
+  });
+  if (entry == end || entry->pathHash != hash || entry->claimed) return false;
+
+  ClixRecord prior{};
+  uint32_t priorCreated = 0;
+  std::string priorPath;
+  if (!st.previous->readRecord(entry->ordinal, prior) ||
+      !canReuseMetadata(st.previous->header(), prior, size, modified, st.readMetadata, extractMetadata) ||
+      !st.previous->readCreationTime(entry->ordinal, priorCreated) || priorCreated != created ||
+      !st.previous->readPath(prior, priorPath, st.probe->folderOffsets, st.probe->folderStride) || priorPath != path)
+    return false;
+
+  bool enriched = false;
+  if (!st.previous->verifyInventoryMetadata(prior, entry->nameEnd, st.probe->metadata, enriched)) {
+    LOG_ERR("LIBIDX", "unreadable inventory metadata for %s", path.c_str());
+    st.failed = true;
+    return false;
+  }
+  entry->claimed = true;
+  ++st.books;
+  if (enriched) ++st.enriched;
+  return true;
+}
 
 // Bound to shownTitle when a book told us nothing. A `std::string()` temporary
 // in that ternary would copy the title on every book that DID tell us something,
@@ -597,7 +664,6 @@ bool findPrior(WalkState& st, const uint64_t pathHash, uint32_t& position, uint1
   if (st.failed) return false;
 
   const bool extractionExpected = st.readMetadata && FsHelpers::hasEpubExtension(name);
-  const uint8_t expectedStatus = extractionExpected ? CLIX_METADATA_EXTRACTED : CLIX_METADATA_NOT_ATTEMPTED;
   bool reuseMetadata = false;
   ClixRecord priorRecord{};
   if (priorFound) {
@@ -613,11 +679,8 @@ bool findPrior(WalkState& st, const uint64_t pathHash, uint32_t& position, uint1
       st.failed = true;
       return false;
     }
-    reuseMetadata = priorRecord.fileSize == fileSize && modificationTime != 0 &&
-                    priorRecord.modificationTime == modificationTime && st.previous->header().formatVersion >= 3 &&
-                    st.previous->header().metadataEnabled == st.readMetadata &&
-                    priorRecord.metadataStatus == expectedStatus &&
-                    (!extractionExpected || st.previous->header().formatVersion >= 7);
+    reuseMetadata = canReuseMetadata(st.previous->header(), priorRecord, fileSize, modificationTime, st.readMetadata,
+                                   extractionExpected);
   }
   // A fold update invalidates derived sort keys, not the stored book metadata.
   const bool reuseSortKeys = reuseMetadata && st.previous->header().foldVersion == CLIX_FOLD_VERSION;
@@ -791,7 +854,7 @@ struct DedupFrame {
 };
 
 void walk(WalkState& st, const std::string& path, const int depth) {
-  if (st.failed || depth > LIBRARY_MAX_DEPTH || isLibraryResourceDirectory(path)) return;
+  if (st.stopped() || depth > LIBRARY_MAX_DEPTH || isLibraryResourceDirectory(path)) return;
 
   const uint16_t dedupBase = st.activeDedupCount;
   const DedupFrame dedupFrame{st, dedupBase};
@@ -832,21 +895,36 @@ void walk(WalkState& st, const std::string& path, const int depth) {
       break;
     }
     st.nameBuf[0] = '\0';
-    entry.getName(st.nameBuf, NAME_BUF_SIZE);
+    const size_t nameLength = entry.getName(st.nameBuf, NAME_BUF_SIZE);
     const bool isDir = entry.isDirectory();
-    const uint32_t size = isDir ? 0 : static_cast<uint32_t>(entry.fileSize());
+    const uint64_t fullSize = isDir ? 0 : entry.fileSize64();
+    const uint32_t size = static_cast<uint32_t>(fullSize);
     const uint32_t creationTime = isDir ? 0 : entry.creationTime();
     const uint32_t modificationTime = isDir ? 0 : entry.modificationTime();
-    entry.close();
+    if (!entry.close() && st.probe) {
+      LOG_ERR("LIBIDX", "cannot close library entry in %s", path.c_str());
+      st.failed = true;
+      break;
+    }
+    if (st.probe && (nameLength == 0 || st.nameBuf[0] == '\0')) {
+      // SdFat also reports zero for names that exceed the UTF-8 buffer.
+      // Let the staged walk keep its existing skip behavior.
+      st.probe->mismatch = true;
+      break;
+    }
 
     if (st.nameBuf[0] == '\0' || isHiddenOrSidecar(st.nameBuf) || (isDir && isSystemDirectory(st.nameBuf))) continue;
     const std::string name(st.nameBuf);
 
     if (isDir) {
       const size_t resumePosition = dir.position();
-      dir.close();
+      if (!dir.close() && st.probe) {
+        LOG_ERR("LIBIDX", "cannot close library directory %s", path.c_str());
+        st.failed = true;
+        return;
+      }
       walk(st, joinLibraryPath(path, name), depth + 1);
-      if (st.failed) return;
+      if (st.stopped()) return;
 
       dir = Storage.open(path.c_str());
       if (!dir || !dir.isDirectory() || !dir.seekSet(resumePosition)) {
@@ -861,10 +939,6 @@ void walk(WalkState& st, const std::string& path, const int depth) {
 
     // A zero-length book is a dangling directory entry: the name enumerates but
     // the contents do not exist. Counted rather than silently dropped.
-    if (size == 0) {
-      st.unreadableSkipped++;
-      continue;
-    }
     // The index stores the name and the folder path behind one length byte
     // each, and readPath() reconstructs "<folder>/<name>" from those bytes. An
     // entry that does not fit is skipped and counted, never clamped: a clamped
@@ -872,8 +946,26 @@ void walk(WalkState& st, const std::string& path, const int depth) {
     // open, and a byte-level cut is not even valid UTF-8. The limit is real —
     // FAT allows 255 UTF-16 units, so a long Cyrillic or CJK filename can run
     // to ~765 UTF-8 bytes.
-    if (name.size() > STAGE_NAME_BYTES || path.size() > FOLDER_PATH_BYTES) {
+    if (size == 0 || name.size() > STAGE_NAME_BYTES || path.size() > FOLDER_PATH_BYTES) {
+      if (st.probe) {
+        st.probe->mismatch = true;
+        break;
+      }
       st.unreadableSkipped++;
+      continue;
+    }
+    // The probe claims exact paths. Defer ambiguous or duplicate entries to
+    // the staging walk instead of dropping them by a name/size hash here.
+    if (st.probe) {
+      const bool extract = st.readMetadata && FsHelpers::hasEpubExtension(name);
+      if (!verifyInventoryBook(st, joinLibraryPath(path, name), fullSize, creationTime, modificationTime, extract)) {
+        st.probe->mismatch = true;
+        break;
+      }
+      if (!folderEmitted) {
+        ++st.folderId;
+        folderEmitted = true;
+      }
       continue;
     }
     const uint64_t key = (static_cast<uint64_t>(fnv1a32(name.data(), name.size())) << 32) | size;
@@ -925,11 +1017,120 @@ void walk(WalkState& st, const std::string& path, const int depth) {
   // Left unchecked, a card glitch mid-listing looks identical to a folder
   // that was fully scanned: books after the failure point silently never
   // reach the index, with nothing to force a retry on the next rebuild.
-  if (!st.failed && FsHelpers::directoryIterationFailed(dir)) {
+  if (!st.stopped() && FsHelpers::directoryIterationFailed(dir)) {
     LOG_ERR("LIBIDX", "directory listing failed before EOF: %s", path.c_str());
     st.failed = true;
   }
-  dir.close();
+  if (!dir.close() && st.probe) {
+    LOG_ERR("LIBIDX", "cannot close library directory %s", path.c_str());
+    st.failed = true;
+  }
+}
+
+enum class InventoryResult { Unchanged, Rebuild, Error };
+
+bool canKeepIndex(const ClixHeader& header, const bool readMetadata) {
+  return header.formatVersion == CLIX_FORMAT_VERSION && header.foldVersion == CLIX_FOLD_VERSION &&
+         header.metadataEnabled == static_cast<uint8_t>(readMetadata) &&
+         (header.flags & (CLIX_FLAG_RANKS_DEGRADED | CLIX_FLAG_DEDUP_DEGRADED | CLIX_FLAG_ARRIVAL_DEGRADED)) == 0;
+}
+
+[[gnu::noinline]] InventoryResult checkInventory(const char* rootPath, LibraryIndexFile& previous,
+                                                 const bool readMetadata, char* nameBuf, BuildStats& stats) {
+  const uint16_t count = previous.bookCount();
+  const uint16_t folderCount = previous.header().folderCount;
+  const bool hasPsram = psramHeapAvailable();
+  const bool allowInternalInventory = count <= INVENTORY_BOOK_LIMIT;
+  if ((!allowInternalInventory && !hasPsram) || !canKeepIndex(previous.header(), readMetadata) || folderCount > count)
+    return InventoryResult::Rebuild;
+
+  BookArray<InventoryEntry> inventory;
+  uint32_t units = 0;
+  for (uint16_t ordinal = 0; ordinal < count; ++ordinal) {
+    serviceBuilder(units);
+    if (buildCancelled()) return InventoryResult::Error;
+    ClixRecord record{};
+    if (!previous.readRecord(ordinal, record)) {
+      LOG_ERR("LIBIDX", "inventory record read failed at %u", static_cast<unsigned>(ordinal));
+      return InventoryResult::Error;
+    }
+    // Failed extracts and unknown timestamps must go through the regular
+    // metadata recovery path, even on otherwise unchanged shelves.
+    if (record.metadataStatus == CLIX_METADATA_FAILED || record.modificationTime == 0)
+      return InventoryResult::Rebuild;
+    if (ordinal == 0 && !inventory.allocate(count, allowInternalInventory)) {
+      LOG_ERR("LIBIDX", "inventory allocation failed; using staged reconciliation");
+      return InventoryResult::Rebuild;
+    }
+    if (!previous.readPathHash(record, inventory[ordinal].pathHash)) {
+      LOG_ERR("LIBIDX", "inventory path hash read failed at %u", static_cast<unsigned>(ordinal));
+      return InventoryResult::Error;
+    }
+    // Name blobs are contiguous in title order. Keep their exact ends so
+    // verification can read the metadata once without crossing into another row.
+    if (ordinal > 0) inventory[ordinal - 1].nameEnd = record.nameOff;
+    inventory[ordinal].ordinal = ordinal;
+  }
+  if (count > 0) inventory[count - 1].nameEnd = previous.header().nameLen;
+  if (count > 1) {
+    std::sort(inventory.get(), inventory.get() + count,
+              [](const InventoryEntry& a, const InventoryEntry& b) { return a.pathHash < b.pathHash; });
+    for (uint16_t i = 1; i < count; ++i) {
+      if (inventory[i - 1].pathHash == inventory[i].pathHash) return InventoryResult::Rebuild;
+    }
+  }
+
+  BookArray<uint32_t> folderOffsets;
+  // One fallible scratch buffer for the largest serialized row's metadata,
+  // larger than the walk's stack budget and needed only during verification.
+  auto metadata = count ? makeUniqueNoThrow<uint8_t[]>(LibraryIndexFile::INVENTORY_METADATA_BYTES) : nullptr;
+  if (count && !metadata) {
+    LOG_ERR("LIBIDX", "inventory metadata allocation failed; using staged reconciliation");
+    return InventoryResult::Rebuild;
+  }
+  InventoryProbe probe;
+  probe.entries = inventory.get();
+  probe.metadata = metadata.get();
+  if (folderCount > 1) {
+    // A direct PSRAM table avoids repeatedly walking long checkpoint intervals
+    // on large shelves with one book per folder. The sparse fallback costs at most 512 bytes.
+    constexpr uint16_t maxInternalCheckpoints = LibraryIndexFile::FOLDER_CHECKPOINT_COUNT;
+    const bool dense = hasPsram && folderCount > maxInternalCheckpoints && folderOffsets.allocate(folderCount, false);
+    const uint16_t checkpointCount = dense ? folderCount : std::min(folderCount, maxInternalCheckpoints);
+    if (!dense && !folderOffsets.allocate(checkpointCount)) {
+      LOG_ERR("LIBIDX", "inventory folder checkpoints allocation failed; using staged reconciliation");
+      return InventoryResult::Rebuild;
+    }
+    const auto keepGoing = [] {
+      serviceSort();
+      return !buildCancelled();
+    };
+    if (!previous.buildFolderCheckpoints(folderOffsets.get(), probe.folderStride, checkpointCount, keepGoing)) {
+      if (buildCancelled()) return InventoryResult::Error;
+      LOG_ERR("LIBIDX", "inventory folder checkpoints could not be read");
+      return previous.ioFailed() ? InventoryResult::Error : InventoryResult::Rebuild;
+    }
+    probe.folderOffsets = folderOffsets.get();
+  }
+
+  WalkState scan;
+  scan.nameBuf = nameBuf;
+  scan.readMetadata = readMetadata;
+  scan.previous = &previous;
+  scan.probe = &probe;
+  walk(scan, rootPath, 0);
+  if (scan.failed || buildCancelled() || previous.ioFailed()) {
+    LOG_ERR("LIBIDX", "inventory check interrupted; keeping the previous index");
+    return InventoryResult::Error;
+  }
+  if (probe.mismatch || scan.books != count || scan.folderId != folderCount) return InventoryResult::Rebuild;
+
+  stats.books = stats.unchanged = stats.metadataReused = count;
+  stats.folders = scan.folderId;
+  stats.enriched = scan.enriched;
+  buildControl.progress.books = count;
+  setBuildPhase(BuildPhase::Organizing);
+  return InventoryResult::Unchanged;
 }
 
 // Shared by the offset and write passes so the name-blob layout has one source of
@@ -1679,18 +1880,43 @@ static bool rebuildLibraryIndex(const char* rootPath, BuildStats& stats, const b
   const uint32_t startMs = millis();
   stats = BuildStats{};
 
-  Storage.mkdir(CACHE_DIR);
   if (!recoverInterruptedInstall()) return false;
   const std::string folderStagePath = std::string(STAGE_PATH) + ".f";
   removeBuildScratch(folderStagePath.c_str());
-  // Every exit below, success or failure, leaves no build scratch behind.
-  const ScopedCleanup scratchCleanup{[&folderStagePath] { removeBuildScratch(folderStagePath.c_str()); }};
 
   auto nameBuf = makeUniqueNoThrow<char[]>(NAME_BUF_SIZE);
   if (!nameBuf) {
     LOG_ERR("LIBIDX", "name buffer alloc failed (%u bytes)", static_cast<unsigned>(NAME_BUF_SIZE));
     return false;
   }
+
+  // Load what the previous index knew, so the walk can recognise the same books.
+  // An obsolete format starts fresh; I/O, record, and allocation failures stop
+  // the rebuild so the previous index remains untouched.
+  LibraryIndexFile previous;
+  uint16_t priorCount = 0;
+  uint16_t nextFirstSeen = 0;
+  if (Storage.exists(INDEX_PATH)) {
+    if (previous.openForReconciliation(INDEX_PATH)) {
+      nextFirstSeen = previous.header().nextFirstSeen;
+      priorCount = previous.bookCount();
+      const auto verified = checkInventory(rootPath, previous, readMetadata, nameBuf.get(), stats);
+      if (verified == InventoryResult::Error) return false;
+      if (verified == InventoryResult::Unchanged) {
+        stats.walkMs = millis() - startMs;
+        LOG_INF("LIBIDX", "unchanged: %u verified without staging, %ums", static_cast<unsigned>(stats.books),
+                static_cast<unsigned>(stats.walkMs));
+        return true;
+      }
+    } else if (previous.ioFailed()) {
+      LOG_ERR("LIBIDX", "cannot read previous index; rebuild deferred");
+      return false;
+    }
+  }
+
+  // Every staged exit leaves no build scratch behind.
+  const ScopedCleanup scratchCleanup{[&folderStagePath] { removeBuildScratch(folderStagePath.c_str()); }};
+  Storage.mkdir(CACHE_DIR);
 
   // The staging record exceeds the task's 256-byte stack budget. Allocate one
   // fallibly for the build and reuse it; static storage would pin scarce DRAM.
@@ -1707,26 +1933,10 @@ static bool rebuildLibraryIndex(const char* rootPath, BuildStats& stats, const b
     // whole library unavailable when 8 KiB cannot be allocated on a C3.
     LOG_ERR("LIBIDX", "dedup key buffer alloc failed; continuing without duplicate detection");
   }
-
-  // Load what the previous index knew, so the walk can recognise the same books.
-  // An obsolete format starts fresh; I/O, record, and allocation failures stop
-  // the rebuild so the previous index remains untouched.
   PriorTable priorByPath;
-  uint16_t priorCount = 0;
-  uint16_t nextFirstSeen = 0;
-  LibraryIndexFile previous;
-  if (Storage.exists(INDEX_PATH)) {
-    if (previous.openForReconciliation(INDEX_PATH)) {
-      nextFirstSeen = previous.header().nextFirstSeen;
-      priorCount = previous.bookCount();
-      if (!buildPriorByPath(previous, priorByPath)) {
-        LOG_ERR("LIBIDX", "cannot stage the previous index; rebuild deferred");
-        return false;
-      }
-    } else if (previous.ioFailed()) {
-      LOG_ERR("LIBIDX", "cannot read previous index; rebuild deferred");
-      return false;
-    }
+  if (previous.isOpen() && !buildPriorByPath(previous, priorByPath)) {
+    LOG_ERR("LIBIDX", "cannot stage the previous index; rebuild deferred");
+    return false;
   }
 
   WalkState st;
@@ -1786,13 +1996,9 @@ static bool rebuildLibraryIndex(const char* rootPath, BuildStats& stats, const b
   stats.unchanged = st.reused;
   stats.enriched = st.enriched;
 
-  if (previous.isOpen() && previous.header().formatVersion == CLIX_FORMAT_VERSION &&
-      previous.header().foldVersion == CLIX_FOLD_VERSION &&
-      previous.header().metadataEnabled == static_cast<uint8_t>(readMetadata) && st.books == priorCount &&
+  if (previous.isOpen() && canKeepIndex(previous.header(), readMetadata) && st.books == priorCount &&
       st.reused == priorCount && stats.metadataReused == priorCount && st.creationTimesUnchanged &&
-      st.unreadableSkipped == 0 && !st.dedupDegraded &&
-      (previous.header().flags & (CLIX_FLAG_RANKS_DEGRADED | CLIX_FLAG_DEDUP_DEGRADED | CLIX_FLAG_ARRIVAL_DEGRADED)) ==
-          0) {
+      st.unreadableSkipped == 0 && !st.dedupDegraded) {
     previous.close();
     stats.walkMs = millis() - startMs;
     LOG_INF("LIBIDX", "unchanged: %u reused, %u parsed, no replacement, %ums",

@@ -68,6 +68,13 @@
 #include "util/ReaderStatusBarJson.h"
 #include "util/StringUtils.h"
 
+#if CROSSINK_APP_PREPARE_UPLOADED_EPUB
+#include <MemoryBudget.h>
+#include <ZipFile.h>
+
+#include "UploadedEpubPreparation.h"
+#endif
+
 namespace {
 // Folders/files to hide from the web interface file browser.
 // Dot-prefixed items are hidden unless showHiddenFiles is enabled.
@@ -77,6 +84,30 @@ constexpr uint16_t LOCAL_UDP_PORT = 8134;
 
 // Static pointer for WebSocket callback (WebSocketsServer requires C-style callback)
 CrossPointWebServer* wsInstance = nullptr;
+
+#if CROSSINK_APP_PREPARE_UPLOADED_EPUB
+// WebDAV writes bypass the web upload handler. Retire the candidate even if
+// the write fails partway, or replaces the book with one of the same size.
+class PrepareAwareWebDAVHandler final : public WebDAVHandler {
+ public:
+  explicit PrepareAwareWebDAVHandler(size_t& candidateSize) : candidateSize(candidateSize) {}
+
+  void raw(WebServer& server, const String& uri, HTTPRaw& raw) override {
+    if (raw.status == RAW_START) candidateSize = 0;
+    WebDAVHandler::raw(server, uri, raw);
+  }
+
+  bool handle(WebServer& server, HTTPMethod method, const String& uri) override {
+    if (method == HTTP_PUT || method == HTTP_DELETE || method == HTTP_MOVE || method == HTTP_COPY) {
+      candidateSize = 0;
+    }
+    return WebDAVHandler::handle(server, method, uri);
+  }
+
+ private:
+  size_t& candidateSize;
+};
+#endif
 
 uint8_t enumRawValueForDisplayIndex(const SettingInfo& setting, uint8_t displayIndex) {
   if (setting.enumRawValues.empty()) {
@@ -483,27 +514,60 @@ void CrossPointWebServer::begin() {
   server->on("/api/plugin-jobs/status", HTTP_GET, [this] { handlePluginJobStatus(); });
   server->on("/api/relay", HTTP_POST, [this] { handleRelay(); });
   server->on("/api/crypto", HTTP_POST, [this] { handleCrypto(); });
-  server->on("/api/fetch", HTTP_POST, [this] { handleFetch(); });
+  server->on("/api/fetch", HTTP_POST, [this] {
+    invalidatePrepareCandidate();
+    handleFetch();
+  });
   server->on("/api/book-key", HTTP_POST, [this] { handleBookKey(); });
-  server->on("/api/plugin-fs", HTTP_POST, [this] { handlePluginFs(); }, [this] { handlePluginFsUpload(); });
+  server->on("/api/plugin-fs", HTTP_POST, [this] { handlePluginFs(); }, [this] {
+#if CROSSINK_APP_PREPARE_UPLOADED_EPUB
+    if (server->upload().status == UPLOAD_FILE_START) invalidatePrepareCandidate();
+#endif
+    handlePluginFsUpload();
+  });
   server->on("/api/status", HTTP_GET, [this] { handleStatus(); });
   server->on("/api/files", HTTP_GET, [this] { handleFileListData(); });
   server->on("/download", HTTP_GET, [this] { handleDownload(); });
 
   // Upload endpoint with special handling for multipart form data
-  server->on("/upload", HTTP_POST, [this] { handleUploadPost(upload); }, [this] { handleUpload(upload); });
+  server->on(
+      "/upload", HTTP_POST,
+      [this] {
+#if CROSSINK_APP_PREPARE_UPLOADED_EPUB
+        if (upload.success) {
+          String filePath = upload.path;
+          if (!filePath.endsWith("/")) filePath += "/";
+          filePath += upload.fileName;
+          recordPrepareCandidate(filePath, upload.size);
+        }
+#endif
+        handleUploadPost(upload);
+      },
+      [this] { handleUpload(upload); });
+#if CROSSINK_APP_PREPARE_UPLOADED_EPUB
+  server->on("/api/prepare-uploaded-epub", HTTP_POST, [this] { handlePrepareUploadedEpub(); });
+#endif
 
   // Create folder endpoint
   server->on("/mkdir", HTTP_POST, [this] { handleCreateFolder(); });
 
   // Rename file endpoint
-  server->on("/rename", HTTP_POST, [this] { handleRename(); });
+  server->on("/rename", HTTP_POST, [this] {
+    invalidatePrepareCandidate();
+    handleRename();
+  });
 
   // Move file endpoint
-  server->on("/move", HTTP_POST, [this] { handleMove(); });
+  server->on("/move", HTTP_POST, [this] {
+    invalidatePrepareCandidate();
+    handleMove();
+  });
 
   // Delete file/folder endpoint
-  server->on("/delete", HTTP_POST, [this] { handleDelete(); });
+  server->on("/delete", HTTP_POST, [this] {
+    invalidatePrepareCandidate();
+    handleDelete();
+  });
 
   // Settings endpoints
   server->on("/settings", HTTP_GET, [this] { handleSettingsPage(); });
@@ -534,7 +598,16 @@ void CrossPointWebServer::begin() {
   const char* davHeaders[] = {"Depth",      "Destination", "Overwrite",     "If",
                               "Lock-Token", "Timeout",     "If-None-Match", "Host"};
   server->collectHeaders(davHeaders, 8);
-  server->addHandler(new WebDAVHandler());  // Note: WebDAVHandler will be deleted by WebServer when server is stopped
+  // WebServer owns the handler.
+#if CROSSINK_APP_PREPARE_UPLOADED_EPUB
+  if (auto* dav = new (std::nothrow) PrepareAwareWebDAVHandler(prepareCandidateSize)) {
+    server->addHandler(dav);
+  } else {
+    LOG_ERR("WEB", "OOM: WebDAV handler");
+  }
+#else
+  server->addHandler(new WebDAVHandler());
+#endif
 
   server->begin();
 
@@ -616,6 +689,7 @@ void CrossPointWebServer::stop() {
   if (!pluginFsUpload.tmp.empty()) Storage.remove(pluginFsUpload.tmp.c_str());
   pluginFsUpload = PluginFsUploadState{};
   running = false;  // Set this FIRST to prevent handleClient from using server
+  invalidatePrepareCandidate();
 
   LOG_DBG("WEB", "[MEM] Free heap before stop: %d bytes", ESP.getFreeHeap());
 
@@ -781,6 +855,130 @@ void CrossPointWebServer::handleNotFound() const {
   server->send(404, "text/plain", message);
 }
 
+void CrossPointWebServer::invalidatePrepareCandidate() {
+#if CROSSINK_APP_PREPARE_UPLOADED_EPUB
+  prepareCandidateSize = 0;
+#endif
+}
+
+#if CROSSINK_APP_PREPARE_UPLOADED_EPUB
+void CrossPointWebServer::recordPrepareCandidate(const String& path, const size_t size) {
+  if (!size || !isEpubFile(path)) return;
+
+  prepareCandidateSize = 0;
+  if (!uploadedepub::isCanonicalPath({path.c_str(), path.length()}) || isProtectedPath(path)) return;
+  prepareCandidatePath = path;
+  // Arduino String leaves a failed assignment empty. Only publish the size
+  // once the path has been copied successfully.
+  if (prepareCandidatePath == path) prepareCandidateSize = size;
+}
+
+void CrossPointWebServer::handlePrepareUploadedEpub() {
+  // All HTTP and WebSocket callbacks run synchronously in handleClient().
+  // Preparing a book occupies that loop until the loader returns.
+  if (upload.file || wsUploadInProgress || fontUpload.file || pluginFsUpload.file) {
+    server->send(409, "application/json", R"({"error":"upload_in_progress"})");
+    return;
+  }
+
+  const String requested = server->arg("path");
+  const std::string_view requestedPath(requested.c_str(), requested.length());
+  if (!uploadedepub::isCanonicalPath(requestedPath)) {
+    server->send(400, "application/json", R"({"error":"invalid_path"})");
+    return;
+  }
+  const std::string_view trustedPath(prepareCandidatePath.c_str(), prepareCandidatePath.length());
+  const size_t slash = requestedPath.rfind('/');
+  // The browser may send the original basename. Both upload routes apply the
+  // same sanitization before saving. The parent must still match exactly.
+  const bool pathMatches =
+      uploadedepub::matchesCandidate(trustedPath, prepareCandidateSize, requestedPath) ||
+      (prepareCandidateSize && slash == trustedPath.rfind('/') &&
+       trustedPath.substr(0, slash) == requestedPath.substr(0, slash) &&
+       trustedPath.substr(slash + 1) == StringUtils::sanitizeFilename(std::string(requestedPath.substr(slash + 1))));
+  if (!pathMatches || isProtectedPath(prepareCandidatePath)) {
+    server->send(409, "application/json", R"({"error":"no_matching_upload"})");
+    return;
+  }
+
+  const auto heap = MemoryBudget::snapshot();
+  // Reuse the optional EPUB rebuild thresholds. They cover the CSS loader's
+  // 64 KiB floor and leave headroom for Wi-Fi and contiguous ZIP workspace.
+  if (heap.freeHeap < MemoryBudget::OPTIONAL_EPUB_REBUILD_MIN_FREE ||
+      heap.maxAllocHeap < MemoryBudget::OPTIONAL_EPUB_REBUILD_MIN_MAX_ALLOC) {
+    LOG_ERR("WEB", "Skipping uploaded EPUB preparation: low heap (%u free, %u largest)", heap.freeHeap,
+            heap.maxAllocHeap);
+    server->send(503, "application/json", R"({"error":"low_memory"})");
+    return;
+  }
+
+  // Consume eligibility before parsing so conversion errors or repeated
+  // requests do not run an expensive operation a second time.
+  const size_t expectedSize = prepareCandidateSize;
+  prepareCandidateSize = 0;
+  const std::string path(prepareCandidatePath.c_str());
+  {
+    HalFile file;
+    const bool opened = Storage.openFileForRead("WEB", path.c_str(), file);
+    const bool intact = opened && !file.isDirectory() && file.size() == expectedSize;
+    if (opened) file.close();
+    if (!intact) {
+      LOG_ERR("WEB", "Uploaded EPUB changed before preparation: %s", path.c_str());
+      server->send(409, "application/json", R"({"error":"upload_changed"})");
+      return;
+    }
+  }
+
+  size_t entries = 0;
+  bool optimized = false;
+  bool protectedBook = false;
+  {
+    ZipFile archive(path);
+    if (!archive.enumerateFilePaths([&](std::string_view entry) {
+          if (++entries % 64 == 0) yield();
+          optimized |= uploadedepub::isOptimizedEntry(entry);
+          protectedBook |= uploadedepub::isProtectedEntry(entry);
+        })) {
+      LOG_ERR("WEB", "Could not scan uploaded EPUB: %s", path.c_str());
+      server->send(422, "application/json", R"({"error":"invalid_epub"})");
+      return;
+    }
+  }
+  if (!optimized || protectedBook) {
+    server->send(422, "application/json", R"({"error":"epub_not_eligible"})");
+    return;
+  }
+
+  // The production loader owns metadata/CSS cache creation. The temporary EPUB
+  // object lives on the heap, as it does in ReaderActivity.
+  auto epub = makeUniqueNoThrow<Epub>(path, "/.crosspoint");
+  if (!epub) {
+    LOG_ERR("WEB", "OOM: uploaded EPUB preparation");
+    server->send(503, "application/json", R"({"error":"low_memory"})");
+    return;
+  }
+  const bool loaded = epub->load(true, false, Epub::XLocationLoadMode::Skip);
+  const auto failure = epub->getLastLoadFailure();
+  const bool cssReady = loaded && epub->getCssParser()->inspectCache() == CssParser::CacheStatus::Complete;
+  epub.reset();
+  if (!loaded) {
+    LOG_ERR("WEB", "Could not prepare uploaded EPUB: %s", path.c_str());
+    if (failure == Epub::OpenFailure::OutOfMemory) {
+      server->send(503, "application/json", R"({"error":"low_memory"})");
+      return;
+    }
+    server->send(422, "application/json", R"({"error":"epub_load_failed"})");
+    return;
+  }
+  if (!cssReady) {
+    LOG_ERR("WEB", "Uploaded EPUB CSS cache incomplete: %s", path.c_str());
+    server->send(422, "application/json", R"({"error":"css_incomplete"})");
+    return;
+  }
+  server->send(200, "application/json", R"({"status":"ready"})");
+}
+#endif
+
 void CrossPointWebServer::handleStatus() const {
   // Get correct IP based on AP vs STA mode
   const String ipAddr = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
@@ -794,6 +992,7 @@ void CrossPointWebServer::handleStatus() const {
   doc["mode"] = apMode ? "AP" : "STA";
   doc["rssi"] = apMode ? 0 : WiFi.RSSI();
   doc["freeHeap"] = ESP.getFreeHeap();
+  doc["canPrepareUploadedEpub"] = CROSSINK_APP_PREPARE_UPLOADED_EPUB != 0;
   doc["uptime"] = millis() / 1000;
   // ?plugin=<name> adds a stable device ID for that plugin: sha256(secret ||
   // name). Not reversible to any hardware ID, and different per plugin.
@@ -2494,7 +2693,12 @@ void CrossPointWebServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* 
       // Check if upload complete
       if (wsUploadReceived >= wsUploadSize) {
         // Explicit close() required: file-scope global persists beyond function scope
-        wsUploadFile.close();
+        if (!wsUploadFile.sync() || !wsUploadFile.close()) {
+          abortWsUpload("WS");
+          LOG_ERR("WS", "Could not finish writing uploaded file");
+          wsServer->sendTXT(num, "ERROR:Failed to finish writing uploaded file");
+          return;
+        }
         wsUploadInProgress = false;
         wsUploadClientNum = 255;
 
@@ -2521,6 +2725,9 @@ void CrossPointWebServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* 
         ImageFolderIndex::invalidateForPath(filePath.c_str());
         sdFontSystem.markRegistryDirtyForPath(filePath.c_str());
 
+#if CROSSINK_APP_PREPARE_UPLOADED_EPUB
+        recordPrepareCandidate(filePath, wsUploadReceived);
+#endif
         wsServer->sendTXT(num, "DONE");
         wsLastProgressSent = 0;
       }

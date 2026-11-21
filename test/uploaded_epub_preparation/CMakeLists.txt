@@ -1,0 +1,3 @@
+add_executable(uploaded_epub_preparation_tests UploadedEpubPreparationTest.cpp)
+target_link_libraries(uploaded_epub_preparation_tests PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(uploaded_epub_preparation_tests)

@@ -2,6 +2,8 @@
 
 ### Added
 
+- Prepare an X4 Pro SD card on an Apple Silicon Mac with the [Card Preparer](docs/card-preparer.md). It builds EPUB metadata and stylesheet caches and Lyra Carousel thumbnails for supported grayscale XTCH books before the first open.
+- On X4 Pro, selecting **Optimize EPUB** in the web uploader also prepares the new book for its first open. Turn off **Prepare for First Open** in Advanced Mode for a quicker transfer.
 - On X4 Pro, the Dashboard shows the last 30 days of reading time and your current streak. Tap the grid or open the last page of Reading Stats to explore the last 30 days and a six-month calendar. The six-month grid spans the screen in one strip, with one column per week. The shading extends to a three-hour top bracket for frequent long readers. Turn off **Show Reading Heatmap** in Reading Stats settings to restore the original Dashboard footer.
 - Mark an EPUB as a short read from the Library, File Browser, or reader Settings. Reading Stats shows Books Read until you mark your first short read, then shows both completion counts. Choose Articles in Reading Stats settings if you prefer that label.
 - Support BOOX Picco and EEGO Reader A4 with touch, frontlight controls, and USB Drive support. Picco also supports its slide switch and tilt page turns.
@@ -39,6 +41,8 @@
 
 - Opening a BMP or PNG shows one loading notice before the picture. Dismissing the image menu restores the picture directly.
 - Touch Dashboard and Minimal Home avoid a redundant screen update when opening a book. When Home generates covers, the loading notice and its first progress bar appear together.
+- File Browser and Library list titles and finished-book checkmarks together in one screen update and reuse completion results while browsing.
+- Library refreshes can reuse the existing index when the books, folders, and metadata settings are unchanged, avoiding temporary files and SD writes.
 - Browsing an indexed Library with many folders reuses folder positions while scrolling. Existing library indexes benefit immediately.
 - On X4 Pro, opening Device Activity from the Dashboard reuses the heatmap data for today's reading time and the seven-day average, avoiding a second search of the card.
 - Upright XTCH comic pages that are smaller or larger than the display render cropped edges and margins more efficiently. Black-and-white pages skip unnecessary grayscale passes, and readers with enough PSRAM can prepare four-tone pages in one read.

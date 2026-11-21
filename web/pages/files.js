@@ -107,9 +107,6 @@ const MODAL_CANCEL_FNS = {
 const MODAL_OUTSIDE_CLICK_FNS = { ...MODAL_CANCEL_FNS, uploadModal: closeUploadModal };
 
 async function hydrate() {
-  // Fetch CrossInk version
-  fetchVersion();
-
   // Dismiss only clicks that also began on the backdrop (CrossPoint #3931).
   document.querySelectorAll(".modal-overlay").forEach(function (overlay) {
     let clickTarget = null;
@@ -426,6 +423,7 @@ function handleCancelUploadModal() {
   }
   // Process running: stop it, keep modal open for retry
   operationCancelled = true;
+  currentPreparation?.abort();
   if (currentUploadWs) {
     currentUploadWs.close();
     currentUploadWs = null;
@@ -1547,6 +1545,7 @@ let wsConnection = null;
 let isUploadInProgress = false; // Prevent modal close during upload/conversion
 let operationCancelled = false; // Set by Cancel to stop conversion loops and upload async handlers
 let uploadGeneration = 0; // Incremented each uploadFile() call; guards stale restoreAfterCancel()
+let currentPreparation = null;
 let currentUploadWs = null; // Active WebSocket reference for external abort
 let currentUploadXhr = null; // Active XHR reference for external abort
 // On-device HTTP uses port 80 and WebSocket uses 81. The simulator maps the
@@ -1589,6 +1588,7 @@ let OVERLAP_PERCENT = 5; // Minimum overlap percentage for splits (5%, 10%, 15%)
 const UPLOAD_SETTINGS_STORAGE_KEY = "crossink.files.uploadSettings.v1";
 const DEFAULT_UPLOAD_SETTINGS = Object.freeze({
   convertBeforeUpload: false,
+  prepareFirstOpen: true,
   renameFromMetadata: false,
   splitLongSections: true,
   preserveCoverColor: true,
@@ -1605,6 +1605,7 @@ let suppressUploadSettingsSave = false;
 function getCurrentUploadSettings() {
   return {
     convertBeforeUpload: !!document.getElementById("convertBeforeUpload")?.checked,
+    prepareFirstOpen: document.getElementById("prepareFirstOpenToggle").checked,
     renameFromMetadata: !!document.getElementById("renameFromMetadataToggle")?.checked,
     splitLongSections: !!document.getElementById("splitLongSectionsToggle")?.checked,
     preserveCoverColor: !!document.getElementById("preserveCoverColorToggle")?.checked,
@@ -1626,6 +1627,7 @@ function applyUploadSettings(settings = {}) {
   suppressUploadSettingsSave = true;
   try {
     document.getElementById("convertBeforeUpload").checked = !!merged.convertBeforeUpload;
+    document.getElementById("prepareFirstOpenToggle").checked = !!merged.prepareFirstOpen;
     document.getElementById("renameFromMetadataToggle").checked = !!merged.renameFromMetadata;
     document.getElementById("splitLongSectionsToggle").checked = !!merged.splitLongSections;
     document.getElementById("preserveCoverColorToggle").checked = !!merged.preserveCoverColor;
@@ -1700,21 +1702,27 @@ const exportLogCheckbox = document.getElementById("export-log-checkbox");
 // CrossInk version (fetched from API)
 let crosspointVersion = "Unknown";
 
-// Fetch version from API
-async function fetchVersion() {
+// Both the controls and the upload queue use the same capability check.
+async function loadReaderStatus() {
   try {
-    const response = await fetch("/api/status");
+    const response = await fetch("/api/status", { signal: AbortSignal.timeout?.(10000) });
     if (response.ok) {
       const data = await response.json();
       crosspointVersion = data.version || "Unknown";
+      if (data.canPrepareUploadedEpub === true) {
+        document.getElementById("prepareFirstOpenToggle").disabled = false;
+        document.getElementById("prepareFirstOpenRow").style.display = "";
+      }
       if (data.device === "X3" || data.device === "X4") {
         DETECTED_DEVICE = data.device;
         applyDeviceTarget();
       }
+      return data.canPrepareUploadedEpub === true;
     }
   } catch (e) {
-    console.error("Failed to fetch version:", e);
+    console.error("Failed to fetch reader status:", e);
   }
+  return false;
 }
 
 // Resolve DEVICE_TARGET ('auto' | 'X4' | 'X3') to a concrete profile and update UI.
@@ -5370,6 +5378,22 @@ function uploadFileHTTP(file, onProgress, onComplete, onError) {
   });
 }
 
+async function prepareUploadedEpub(path) {
+  try {
+    currentPreparation = new AbortController();
+    const response = await fetch("/api/prepare-uploaded-epub", {
+      method: "POST",
+      body: new URLSearchParams({ path }),
+      signal: currentPreparation.signal,
+    });
+    return response.ok && (await response.json()).status === "ready";
+  } catch {
+    return false;
+  } finally {
+    currentPreparation = null;
+  }
+}
+
 async function uploadFile() {
   if (isUploadInProgress) return;
 
@@ -5408,6 +5432,8 @@ async function uploadFile() {
 
   let currentIndex = 0;
   const failedFiles = [];
+  const unpreparedFiles = [];
+  const prepareFirstOpen = convertEnabled && document.getElementById("prepareFirstOpenToggle").checked;
   let useWebSocket = true; // Try WebSocket first
 
   // Check if we should use batch logging mode
@@ -5423,6 +5449,9 @@ async function uploadFile() {
   async function uploadNextFile() {
     if (currentIndex >= files.length) {
       // All files processed - show summary
+      if (unpreparedFiles.length) {
+        await showWebAlert(`These books were uploaded. CrossInk can prepare them on first open.\n\n${unpreparedFiles.join("\n")}`);
+      }
       if (failedFiles.length === 0) {
         progressFill.style.backgroundColor = "#4caf50";
         progressText.textContent = "All uploads complete!";
@@ -5513,7 +5542,22 @@ async function uploadFile() {
       progressText.textContent = `${prefix} ${file.name} (${currentIndex + 1}/${files.length})${methodText} — ${uploadPercent}%`;
     };
 
-    const onComplete = () => {
+    const onComplete = async () => {
+      if (prepareFirstOpen && needsConversion && (await readerSupportsPreparation) && !operationCancelled) {
+        let prepared = false;
+        if (conversionSucceeded) {
+          progressText.textContent = `Uploaded. Preparing ${file.name} for first open…`;
+          const path = currentPath.replace(/\/$/, "") + "/" + file.name;
+          prepared = await prepareUploadedEpub(path);
+        }
+        if (!prepared) unpreparedFiles.push(file.name);
+      }
+      if (operationCancelled) {
+        // The transport already acknowledged this file before checking or preparing it.
+        await showWebAlert(`${file.name} is saved. Remaining uploads stopped.`);
+        window.location.reload();
+        return;
+      }
       // Save file log to batch if in batch mode and this file was converted
       // Consider it successful only if conversion didn't fail
       if (useBatchLog && needsConversion) {
@@ -5630,7 +5674,7 @@ async function uploadFile() {
       // Ensure progress bar shows 100% before moving to next file
       progressFill.style.width = "100%";
       progressText.textContent = `Upload complete: ${file.name}`;
-      onComplete();
+      await onComplete();
     } catch (error) {
       if (operationCancelled) {
         if (uploadGeneration === myGeneration) restoreAfterCancel();
@@ -5649,7 +5693,7 @@ async function uploadFile() {
         // Retry this file with HTTP
         try {
           await uploadFileHTTP(file, onProgress, null, null);
-          onComplete();
+          await onComplete();
         } catch (httpError) {
           onError(httpError.message);
         }
@@ -5951,6 +5995,7 @@ function confirmMove() {
 
   xhr.send(formData);
 }
+const readerSupportsPreparation = loadReaderStatus();
 hydrate();
 
 loadPlugins("files");

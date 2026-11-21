@@ -41,6 +41,7 @@ include(GoogleTest)
 
 add_subdirectory(streaming_json_parser)
 add_subdirectory(release_json_parser)
+add_subdirectory(uploaded_epub_preparation)
 add_subdirectory(differential_rounding)
 add_subdirectory(hyphenation_eval)
 add_subdirectory(utf8_compose)
@@ -233,6 +234,8 @@ find_program(NODE_EXECUTABLE node)
 if(NODE_EXECUTABLE)
   add_test(NAME TransferWebSocketRegression
     COMMAND ${NODE_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_transfer_websocket.cjs)
+  add_test(NAME PrepareUploadedEpubBrowserRegression
+    COMMAND ${NODE_EXECUTABLE} --test ${REPO_ROOT}/test/scripts/test_prepare_upload.cjs)
 endif()
 add_subdirectory(progress_sync)
 add_test(NAME WebDavCredentialsRegression
