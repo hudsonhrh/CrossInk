@@ -36,11 +36,11 @@ class BookArray {
                 "BookArray holds plain records only");
 
  public:
-  bool allocate(const size_t count) {
+  bool allocate(const size_t count, const bool allowInternalFallback = true) {
     const size_t bytes = (count == 0 ? 1 : count) * sizeof(T);
     storage.reset();
     if (psramHeapAvailable()) storage = makeAlignedByteBufferNoThrow(bytes, MemoryPool::Psram);
-    if (!storage) storage = makeAlignedByteBufferNoThrow(bytes);
+    if (!storage && allowInternalFallback) storage = makeAlignedByteBufferNoThrow(bytes);
     if (storage) memset(storage.get(), 0, bytes);
     return static_cast<bool>(storage);
   }

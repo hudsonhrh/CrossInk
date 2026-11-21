@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "AppCapabilities.h"
+
 // Structure to hold file information
 struct FileInfo {
   String name;
@@ -119,6 +121,13 @@ class CrossPointWebServer {
   void handleRename() const;
   void handleMove() const;
   void handleDelete() const;
+  void invalidatePrepareCandidate();
+#if CROSSINK_APP_PREPARE_UPLOADED_EPUB
+  String prepareCandidatePath;
+  size_t prepareCandidateSize = 0;
+  void recordPrepareCandidate(const String& path, size_t size);
+  void handlePrepareUploadedEpub();
+#endif
 
   // Settings handlers
   void handleSettingsPage() const;

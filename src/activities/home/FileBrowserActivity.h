@@ -92,12 +92,10 @@ class FileBrowserActivity final : public Activity {
   // renderer supplies a local row number and this records its absolute base.
   size_t actionWindowFirst = 0;
   freeink::ui::ListNav listNav;
-  // Finished state of drawn books, owned by the render task. Actions that may
-  // change a book's status run on the main loop and only raise the stale flag.
+  // The main loop and render task share completion state under RenderLock.
   FinishedBookCache finishedCache;
   std::atomic<bool> finishedRowsStale{false};
   void markFinishedRowsStale() { finishedRowsStale.store(true, std::memory_order_release); }
-  bool isFinishedBook(const std::string& entry, const std::string& fullPath);
 
   static void listScreen(UiApp::ScreenType& screen, void* user);
   static void onDeleteEvent(const freeink::ui::ActionEvent& event, void* user);

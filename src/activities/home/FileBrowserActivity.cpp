@@ -290,16 +290,6 @@ void FileBrowserActivity::loadFiles() {
   loadFilesLocked();
 }
 
-bool FileBrowserActivity::isFinishedBook(const std::string& entry, const std::string& fullPath) {
-  if (mode != Mode::Books || entry.empty() || UITheme::getFileIcon(entry) != UIIcon::Book) return false;
-  const auto key = static_cast<uint32_t>(std::hash<std::string>{}(fullPath));
-  bool finished = false;
-  if (finishedCache.lookup(key, finished)) return finished;
-  finished = BookActions::isBookCompletedForList(fullPath);
-  finishedCache.store(key, finished);
-  return finished;
-}
-
 void FileBrowserActivity::onFrontlightPanelClosed() {
   // The panel's Reading Stats page can set or clear a book's finished date.
   markFinishedRowsStale();
@@ -893,16 +883,22 @@ void FileBrowserActivity::showFileActionMenu(const std::string& entry, bool igno
                 });
             return;
           case FileBrowserAction::ToggleCompleted:
-            if (BookActions::toggleBookCompleted(fullPath, getFileName(entry), completedFeedbackIsFinished)) {
-              pendingCompletedFeedback = true;
-              completedFeedbackShowTime = millis();
-            }
             {
               RenderLock lock(*this);
-              loadFilesLocked();
-              selectorIndex = entryCount() == 0 ? 0 : std::min(selectorIndex, entryCount() - 1);
+              if (!BookActions::toggleBookCompleted(fullPath, getFileName(entry), completedFeedbackIsFinished)) return;
+              pendingCompletedFeedback = true;
+              completedFeedbackShowTime = millis();
+              if (finishedRowsStale.exchange(false, std::memory_order_acq_rel)) finishedCache.clear();
+              // Marking an EPUB finished can move it out of this folder.
+              if (completedFeedbackIsFinished && SETTINGS.moveFinishedToReadFolder &&
+                  FsHelpers::hasEpubExtension(fullPath) && !Storage.exists(fullPath.c_str())) {
+                loadFilesLocked();
+                selectorIndex = entryCount() == 0 ? 0 : std::min(selectorIndex, entryCount() - 1);
+              } else {
+                finishedCache.store(static_cast<uint32_t>(std::hash<std::string>{}(fullPath)),
+                                    completedFeedbackIsFinished);
+              }
             }
-            requestUpdate(true);
             return;
           case FileBrowserAction::EpubRenderMode: {
             const uint8_t currentIndex =
@@ -1032,8 +1028,6 @@ void FileBrowserActivity::renameFile(const std::string& oldPath, const std::stri
 }
 
 void FileBrowserActivity::toggleHiddenFiles() {
-  const std::string currentEntry =
-      (entryCount() > 0 && selectorIndex < entryCount()) ? entryNameAt(selectorIndex) : std::string();
   SETTINGS.showHiddenFiles = SETTINGS.showHiddenFiles ? 0 : 1;
   if (!SETTINGS.saveToFile()) {
     LOG_ERR("FileBrowser", "Failed to save showHiddenFiles=%u", SETTINGS.showHiddenFiles);
@@ -1041,6 +1035,7 @@ void FileBrowserActivity::toggleHiddenFiles() {
 
   {
     RenderLock lock(*this);
+    const std::string currentEntry = selectorIndex < entryCount() ? entryNameAt(selectorIndex) : std::string();
     if (!SETTINGS.showHiddenFiles && containsHiddenPathSegment(basepath)) {
       basepath = "/";
     }
@@ -1063,7 +1058,7 @@ void FileBrowserActivity::onDeleteEvent(const fui::ActionEvent& event, void* use
   const std::string entry = self->entryNameAt(row);
   self->swipeDelete.close();
   self->app.clearTapFlash();
-  if (entry.empty() || entry == "../" || entry == "..") return;
+  if (entry.empty() || entry == "?" || entry == "../" || entry == "..") return;
   self->selectorIndex = row;
   const std::string path = buildFullPath(self->basepath, entry);
   lock.unlock();
@@ -1081,8 +1076,9 @@ void FileBrowserActivity::onRowEvent(const fui::ActionEvent& event, void* user) 
     if (event.value < 0) return;
     const size_t row = self->actionWindowFirst + static_cast<size_t>(event.value);
     if (row >= self->entryCount()) return;
+    entry = self->entryNameAt(row);
+    if (entry.empty() || entry == "?") return;
     self->selectorIndex = row;
-    entry = self->entryNameAt(self->selectorIndex);
   }
   if (event.longPress && self->mode == Mode::Books) {
     self->showFileSelection = true;
@@ -1122,8 +1118,11 @@ void FileBrowserActivity::selectDirectory() {
 }
 
 void FileBrowserActivity::openSettings() {
-  const std::string selectedEntry =
-      entryCount() > 0 && selectorIndex < entryCount() ? entryNameAt(selectorIndex) : std::string();
+  std::string selectedEntry;
+  {
+    RenderLock lock(*this);
+    if (selectorIndex < entryCount()) selectedEntry = entryNameAt(selectorIndex);
+  }
   startActivityForResult(
       std::make_unique<SettingsActivity>(renderer, mappedInput, false, true, SettingsActivity::View::FileBrowser),
       [this, selectedEntry](const ActivityResult&) {
@@ -1152,40 +1151,33 @@ void FileBrowserActivity::activateSelected() {
     lockNextConfirmRelease = false;
     return;
   }
-  if (entryCount() == 0) return;
-
-  const std::string entry = entryNameAt(selectorIndex);
-  const bool isDirectory = (entry.back() == '/');
-
-  // Firmware picker: select file -> return path; navigate into directories normally.
-  if (mode == Mode::PickFirmware && !isDirectory) {
-    std::string cleanBasePath = basepath;
-    if (cleanBasePath.back() != '/') cleanBasePath += "/";
-    ActivityResult res{FilePathResult{cleanBasePath + entry}};
-    res.isCancelled = false;
-    setResult(std::move(res));
-    finish();
-    return;
-  }
-
+  bool isDirectory;
   std::string fullPath;
   {
-    // listScreen() reads basepath and file entry storage on the render task.
-    // Keep their mutation together so it never sees freed row strings.
+    // The render task shares the indexed name cache and list backing storage.
     RenderLock lock(*this);
-    if (basepath.back() != '/') basepath += "/";
+    if (selectorIndex >= entryCount()) return;
+    const std::string entry = entryNameAt(selectorIndex);
+    if (entry.empty() || entry == "?") return;
+    isDirectory = entry.back() == '/';
     if (isDirectory) {
-      basepath += entry.substr(0, entry.length() - 1);
+      basepath = buildFullPath(basepath, entry);
+      basepath.pop_back();
       loadFilesLocked();
       selectorIndex = 0;
       topIndex = 0;
       showFileSelection = true;
     } else {
-      fullPath = basepath + entry;
+      fullPath = buildFullPath(basepath, entry);
     }
   }
   if (isDirectory) {
     requestUpdate();
+  } else if (mode == Mode::PickFirmware) {
+    ActivityResult res{FilePathResult{std::move(fullPath)}};
+    res.isCancelled = false;
+    setResult(std::move(res));
+    finish();
   } else {
     onSelectBook(fullPath);
   }
@@ -1213,7 +1205,10 @@ void FileBrowserActivity::loop() {
                             mappedInput.wasReleased(MappedInputManager::Button::Up) ||
                             mappedInput.wasReleased(MappedInputManager::Button::Down);
     if (timedOut || navPressed) {
-      pendingCompletedFeedback = false;
+      {
+        RenderLock lock(*this);
+        pendingCompletedFeedback = false;
+      }
       requestUpdate();
       return;
     }
@@ -1241,19 +1236,22 @@ void FileBrowserActivity::loop() {
   }
 
   const int listSize = static_cast<int>(entryCount());
-  if (entryCount() > 0) {
-    const std::string entry = entryNameAt(selectorIndex);
-    const bool isDirectory = (entry.back() == '/');
-    if (mode == Mode::Books && !longPressConfirmHandled && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
-        mappedInput.getHeldTime() >= GO_HOME_MS) {
+  if (listSize > 0 && mode == Mode::Books && !longPressConfirmHandled &&
+      mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= GO_HOME_MS) {
+    std::string entry;
+    {
+      RenderLock lock(*this);
+      entry = entryNameAt(selectorIndex);
+    }
+    if (!entry.empty() && entry != "?") {
       longPressConfirmHandled = true;
-      if (isDirectory) {
+      if (entry.back() == '/') {
         showDirectoryActionMenu(entry, true);
       } else {
         showFileActionMenu(entry, true);
       }
-      return;
     }
+    return;
   }
 
   // Touch goes through the FreeInkApp: render() registered the row hit rects;
@@ -1566,7 +1564,7 @@ void FileBrowserActivity::buildListScreen(UiApp::ScreenType& screen) {
   }
   const size_t drawCount = std::min<size_t>(visibleRows, totalEntries - static_cast<size_t>(topIndex));
   actionWindowFirst = usesVirtualList ? 0 : static_cast<size_t>(topIndex);
-  if (finishedRowsStale.exchange(false, std::memory_order_acq_rel)) finishedCache.clear();
+  finishedCache.beginFrame();
 
   // Only materialize the visible window. Large folders continue to use
   // FileIndex instead of duplicating every filename on the heap for UI rows.
@@ -1589,7 +1587,16 @@ void FileBrowserActivity::buildListScreen(UiApp::ScreenType& screen) {
     fui::ListItem item;
     item.label = names[i].c_str();
     if (!values[i].empty()) item.value = values[i].c_str();
-    const UIIcon icon = isFinishedBook(entry, fullPath) ? UIIcon::BookCheck : UITheme::getFileIcon(entry);
+    UIIcon icon = UITheme::getFileIcon(entry);
+    if (mode == Mode::Books && icon == UIIcon::Book) {
+      bool finished = false;
+      const auto key = static_cast<uint32_t>(std::hash<std::string>{}(fullPath));
+      if (!finishedCache.lookup(key, finished)) {
+        finished = BookActions::isBookCompletedForList(fullPath);
+        finishedCache.store(key, finished);
+      }
+      if (finished) icon = UIIcon::BookCheck;
+    }
     item.icon = listIconFor(icon, twoLineRows ? 32 : 24);
     item.actionValue = static_cast<int16_t>(usesVirtualList ? entryIndex : i);
     items.push_back(item);
@@ -1637,6 +1644,7 @@ void FileBrowserActivity::buildListScreen(UiApp::ScreenType& screen) {
 
 void FileBrowserActivity::render(RenderLock&&) {
   renderer.clearScreen();
+  if (finishedRowsStale.exchange(false, std::memory_order_acq_rel)) finishedCache.clear();
 
   const auto pageWidth = renderer.getScreenWidth();
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -1698,9 +1706,9 @@ void FileBrowserActivity::render(RenderLock&&) {
 
   if (pendingCompletedFeedback) {
     GUI.drawPopup(renderer, completedFeedbackIsFinished ? tr(STR_MARKED_FINISHED) : tr(STR_MARKED_UNFINISHED));
+  } else {
+    renderer.displayBuffer();
   }
-
-  renderer.displayBuffer();
 }
 
 size_t FileBrowserActivity::findEntry(const std::string& name) {

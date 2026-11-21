@@ -38,6 +38,9 @@ inline unsigned flushes = 0;
 inline unsigned delays = 0;
 inline void (*onService)() = nullptr;
 inline std::map<std::string, unsigned> writesByPath;
+inline std::map<std::string, unsigned> writeOpensByPath;
+inline unsigned successfulRenames = 0;
+inline unsigned successfulRemovals = 0;
 inline std::map<std::string, unsigned> directoryEntriesByPath;
 inline bool failureTriggered = false;
 inline std::map<std::string, std::vector<std::string>> extraDirectoryEntries;
@@ -73,6 +76,9 @@ inline void reset() {
   delays = 0;
   onService = nullptr;
   writesByPath.clear();
+  writeOpensByPath.clear();
+  successfulRenames = 0;
+  successfulRemovals = 0;
   directoryEntriesByPath.clear();
   failureTriggered = false;
   extraDirectoryEntries.clear();
@@ -83,6 +89,10 @@ inline void resetIoCounters() {
   seeks = 0;
   flushes = 0;
   delays = 0;
+  writesByPath.clear();
+  writeOpensByPath.clear();
+  successfulRenames = 0;
+  successfulRemovals = 0;
 }
 
 inline void add(const std::string& path, const std::string& bytes = "book", const uint32_t time = 1) {
@@ -253,6 +263,7 @@ class HalStorage {
       fake::add(path, "");
     }
     HalFile file = open(path);
+    if (file && (oflag & (O_CREAT | O_WRONLY | O_RDWR)) != 0) ++fake::writeOpensByPath[path];
     if (file && (oflag & O_TRUNC) != 0) file.node->bytes.clear();
     if (file && (oflag & O_APPEND) != 0) file.pos = file.fileSize();
     return file;
@@ -265,6 +276,7 @@ class HalStorage {
     return openFileForRead(module, path.c_str(), file);
   }
   bool openFileForWrite(const char*, const char* path, HalFile& file) {
+    ++fake::writeOpensByPath[path];
     fake::add(path, "");
     file = open(path);
     return true;
@@ -272,7 +284,11 @@ class HalStorage {
   bool openFileForWrite(const char* module, const std::string& path, HalFile& file) {
     return openFileForWrite(module, path.c_str(), file);
   }
-  bool remove(const char* path) { return fake::files.erase(path) != 0; }
+  bool remove(const char* path) {
+    if (fake::files.erase(path) == 0) return false;
+    ++fake::successfulRemovals;
+    return true;
+  }
   bool removeDir(const char* path) {
     if (!exists(path)) return false;
     const std::string prefix = std::string(path) + "/";
@@ -292,6 +308,7 @@ class HalStorage {
     if (fake::fail(fake::failRename) || !exists(from) || exists(to)) return false;
     fake::files[to] = fake::files[from];
     fake::files.erase(from);
+    ++fake::successfulRenames;
     return true;
   }
 };

@@ -85,7 +85,19 @@
           </div>
           <!-- Advanced Settings Content -->
           <div class="advanced-settings-content" id="advancedSettingsContent">
-            <div class="advanced-setting-row section-split-setting-row">
+            <div class="advanced-setting-row wrapping-toggle-row" id="prepareFirstOpenRow" style="display: none">
+              <div class="setting-label">
+                <label class="setting-title" for="prepareFirstOpenToggle">Prepare for First Open</label>
+                <div class="setting-desc" id="prepareFirstOpenHelp">Build the book index and styles on the reader during transfer.</div>
+              </div>
+              <div class="setting-controls">
+                <label class="toggle-switch">
+                  <input type="checkbox" id="prepareFirstOpenToggle" aria-describedby="prepareFirstOpenHelp" onchange="updateUploadSettingsPersistence()" checked disabled />
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+            </div>
+            <div class="advanced-setting-row wrapping-toggle-row">
               <div class="setting-label">
                 <div class="setting-title">Split Long Sections</div>
                 <div class="setting-desc">Break oversized chapters into smaller reader-friendly sections</div>
@@ -97,7 +109,7 @@
                 </label>
               </div>
             </div>
-            <div class="advanced-setting-row">
+            <div class="advanced-setting-row wrapping-toggle-row">
               <div class="setting-label">
                 <div class="setting-title">Keep Cover in Color</div>
                 <div class="setting-desc">Resize the cover safely without grayscale conversion</div>
@@ -228,7 +240,7 @@
                 </label>
               </div>
             </div>
-            <div class="advanced-setting-row">
+            <div class="advanced-setting-row wrapping-toggle-row">
               <div class="setting-label">
                 <div class="setting-title">Remember Settings</div>
                 <div class="setting-desc">Store these upload options in this browser</div>

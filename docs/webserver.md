@@ -107,10 +107,8 @@ The File Manager tab can:
 - Move files into existing folders
 - Delete one or more selected files or empty folders
 
-Uploading a file with the same name as an existing one replaces it. When EPUB
-files are replaced, moved, renamed, or deleted through the web server, the
-matching book cache (saved page layout and cover data) is cleared so old
-information is not reused.
+The File Manager picks an available filename when a name is already in use,
+for example `Book (2).epub`. Existing books keep their reading progress.
 
 #### EPUB Optimization
 
@@ -126,6 +124,19 @@ as JPEG at 85% quality, and apply basic EPUB repairs such as safer SVG handling.
 device, JPEG quality, image split or rotation handling, split overlap, whether to
 keep the cover in color, whether to rename the file from the book's title and
 author, and whether large EPUB sections are split into smaller reader sections.
+
+On X4 Pro, selecting **Optimize EPUB** also prepares each newly uploaded EPUB
+for its first open by default. The phone or computer optimizes the EPUB, then
+the reader builds its chapter list, table of contents and stylesheet cache.
+Keep File Transfer open until the browser finishes. This adds time to the
+transfer and shortens the first-open wait. Page layout still happens while
+reading. For a quicker transfer, turn off **Advanced Mode → Prepare for First
+Open**. Select **Remember Settings** to keep that choice in this browser.
+If preparation is skipped, the uploaded book stays on the card and the reader
+can prepare it on first open. Books already on the card work as usual.
+
+For books already on a mounted card, including supported XTCH comics, see the
+[Mac Card Preparer](card-preparer.md).
 
 Optimization changes the EPUB file contents before upload. If you sync with
 **Document Matching** set to **Binary** (which identifies books by their file

@@ -123,12 +123,9 @@ class LibraryActivity final : public Activity {
   std::string seriesScratch;
   std::string genreScratch;
   std::string subtitleScratch;
-  // Finished state for recently drawn rows, keyed by a path hash so sort,
-  // filter and search changes cannot mislabel a row. Index rows use the stored
-  // path hash, so cache hits do not read the full path. Any dialog or the
-  // frontlight panel clears it because they can change a book's status.
+  // Index ordinals survive sort/filter changes and are reset on rebuild.
+  // Recents use path hashes in a separate key space. RenderLock protects both.
   FinishedBookCache finishedCache;
-  bool isFinishedRow(int row);
 
   static void listScreen(UiApp::ScreenType& screen, void* user);
   static void onDeleteEvent(const freeink::ui::ActionEvent& event, void* user);
@@ -147,7 +144,8 @@ class LibraryActivity final : public Activity {
   int rowCount() const;
   uint16_t ordinalForRow(int row);
   uint16_t filteredSourceRow(uint16_t row) const;
-  bool readBook(int row, RecentBook& book, bool fullPath = true);
+  bool readBook(int row, RecentBook& book);
+  bool readIndexedBook(uint16_t ordinal, library::ClixRecord& record, RecentBook& book, bool fullPath);
   uint32_t groupForRow(int row);
   uint16_t dateGroupForRow(int row);
   bool metadataGroupForRow(int row, std::string& out);
