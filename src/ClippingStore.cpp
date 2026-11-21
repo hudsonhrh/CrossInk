@@ -402,24 +402,33 @@ bool ClippingStore::clippingTextMatchesEdges(const Clipping& clipping, const std
 }
 
 bool ClippingStore::readClippingPreview(const size_t index, std::string& out) const {
-  out.clear();
-  const Clipping* clipping = clippingAt(index);
-  if (!clipping || storeFilePath.empty()) {
-    LOG_ERR("CLIP", "Invalid clipping preview index: %u", static_cast<unsigned>(index));
+  return readClippingPreviews(index, &out, 1);
+}
+
+bool ClippingStore::readClippingPreviews(const size_t first, std::string* out, const size_t count) const {
+  if (count == 0) return true;
+  for (size_t slot = 0; slot < count; ++slot) out[slot].clear();
+  if (first >= clippings.size() || count > clippings.size() - first || storeFilePath.empty()) {
+    LOG_ERR("CLIP", "Invalid clipping preview range: %u + %u", static_cast<unsigned>(first),
+            static_cast<unsigned>(count));
     return false;
   }
-  if (clipping->textLength == 0) return true;
 
   FsFile f;
-  if (!Storage.openFileForRead("CLIP", storeFilePath, f)) return false;
-  if (!f.seek(clipping->textOffset)) {
-    f.close();
-    LOG_ERR("CLIP", "Failed to seek clipping preview at %u", clipping->textOffset);
-    return false;
+  bool ok = true;
+  for (size_t slot = 0; slot < count; ++slot) {
+    const Clipping& clipping = clippings[first + slot];
+    if (clipping.textLength == 0) continue;
+    if (!f.isOpen() && !Storage.openFileForRead("CLIP", storeFilePath, f)) return false;
+    if (!f.seek(clipping.textOffset)) {
+      LOG_ERR("CLIP", "Failed to seek clipping preview at %u", clipping.textOffset);
+      ok = false;
+    } else if (!clippingPreview::read(f, clipping.textLength, out[slot])) {
+      LOG_ERR("CLIP", "Failed to read clipping preview at %u", clipping.textOffset);
+      ok = false;
+    }
   }
-  const bool ok = clippingPreview::read(f, clipping->textLength, out);
-  f.close();
-  if (!ok) LOG_ERR("CLIP", "Failed to read clipping preview at %u", clipping->textOffset);
+  if (f.isOpen()) f.close();
   return ok;
 }
 

@@ -39,6 +39,7 @@
 
 ### Changed
 
+- The Dashboard cycles through the three most recent unfinished books or short reads.
 - Opening a BMP or PNG shows one loading notice before the picture. Dismissing the image menu restores the picture directly.
 - Touch Dashboard and Minimal Home avoid a redundant screen update when opening a book. When Home generates covers, the loading notice and its first progress bar appear together.
 - File Browser and Library list titles and finished-book checkmarks together in one screen update and reuse completion results while browsing.
@@ -57,6 +58,8 @@
 - Plain-text pages skip unnecessary line measurements. Monochrome XTC page turns and sleep backgrounds skip blank pixels and draw solid spans together. Straight rules, underlines, and borders also take less time to draw.
 - Reading Stats and the Dashboard heatmap read daily history in larger batches. EPUB paragraph and list-item jumps also use fewer SD reads in cached chapters.
 - Assembling a long EPUB clipping reuses one output buffer, reducing temporary allocations for long words and mixed-script text.
+- EPUB clipping list previews load faster by reading visible snippets together and reusing them while the visible rows stay the same.
+- The clippings list uses the space previously reserved for button hints. In clipping detail, **Go to text** returns to the saved passage.
 - Cycle through up to three recent books on Dashboard Home. Swipe left on a touchscreen or hold the front Back button on a button reader.
 - `Settings > System > KOReader Sync` is now `Sync Server`. Reading Stats and Clippings are opt-in under `What to Sync` and require server support.
 - English is the only built-in interface language. Download other languages through Language settings. On PSRAM-equipped devices with small factory data partitions, including X4 Pro, language and hyphenation packs can use an SD cache without repartitioning.
@@ -88,6 +91,7 @@
 - Marking an EPUB as a book or short read preserves its current reading history when a stats file temporarily cannot be read, including after an interrupted classification change.
 - A partial EPUB clipping ending at an authored hyphen keeps that hyphen when the layout adds another one later in the same word.
 - New EPUB clippings preserve spaces between tightly set words in View Clippings and `My Clippings.txt` (#968).
+- Full EPUB clipping details keep saved paragraph breaks and blank lines.
 - On X4 Pro, Reading Stats keeps its page indicators above the calibrated screen edge. Pausing reading-stat tracking preserves the Dashboard book cover.
 - Credit EPUB and XTC reading to the correct local day across midnight. Preserve live stats if a save fails, retry updates after SD errors, and finish pending saves before sleep, reader restart, or USB Drive handoff.
 - Preserve unreadable stats and offer to restore them from a verified backup. Keep daily, manual, and clockless backups separate and prune numbered backups in the correct order beyond 999.
