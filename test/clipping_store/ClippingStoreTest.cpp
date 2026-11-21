@@ -2,10 +2,12 @@
 #include <uzlib.h>
 
 #include <cassert>
+#include <cstdio>
 #include <cstdlib>
 #include <new>
 
 #include "ClippingStore.h"
+#include "activities/reader/ClippingPreviewWindow.h"
 #include "activities/reader/ReadingStatsUtils.h"
 
 namespace {
@@ -90,6 +92,101 @@ void cannotMutate(const std::string& original) {
   store.clearAll();
   store.unload();
   assert(bytes(path()) == original);
+}
+
+void assertPreviewIo(unsigned opens, unsigned seeks, unsigned reads, unsigned closes) {
+  assert(fake::readOpens == opens && fake::seeks == seeks && fake::reads == reads && fake::closes == closes);
+}
+
+void testPreviewWindow() {
+  constexpr size_t visibleRows = 4;
+  reset();
+  assert(load());
+  for (uint16_t i = 0; i < 7; ++i) {
+    const std::string text = i == 6 ? "" : "\tPassage " + std::to_string(i) + "\n";
+    assert(store.addClipping(i, 0, 0, 1, 0, 2, 3, "Chapter", 0, text, UINT16_MAX, 123) ==
+           ClippingStore::AddResult::Added);
+  }
+
+  // Measure the original per-row loop for entry and an unchanged redraw.
+  std::string label;
+  for (int draw = 0; draw < 2; ++draw) {
+    fake::resetIoCounters();
+    for (size_t i = 0; i < visibleRows; ++i) {
+      assert(store.readClippingPreview(i, label));
+      assert(label == "Passage " + std::to_string(i));
+    }
+    assertPreviewIo(4, 4, 4, 4);
+    std::printf("Per-row %s (opens/seeks/reads): %u/%u/%u\n", draw == 0 ? "entry" : "redraw", fake::readOpens,
+                fake::seeks, fake::reads);
+  }
+
+  ClippingPreviewWindow window;
+  window.reserve(store.clippingCount());
+  fake::resetIoCounters();
+  window.load(store, 0, visibleRows);
+  assertPreviewIo(1, 4, 4, 1);
+  std::printf("Batched entry (opens/seeks/reads): %u/%u/%u\n", fake::readOpens, fake::seeks, fake::reads);
+  for (size_t i = 0; i < visibleRows; ++i) assert(window[i] == "Passage " + std::to_string(i));
+
+  fake::resetIoCounters();
+  window.load(store, 0, visibleRows);
+  assertPreviewIo(0, 0, 0, 0);
+  std::printf("Cached redraw (opens/seeks/reads): %u/%u/%u\n", fake::readOpens, fake::seeks, fake::reads);
+
+  window.load(store, 2, visibleRows);
+  assertPreviewIo(1, 4, 4, 1);
+  assert(window[0] == "Passage 2" && window[3] == "Passage 5");
+  // Slot 1 in the scrolled window maps to absolute selection 3 for detail reads.
+  assert(window[1] == "Passage 3");
+  assert(store.readClippingText(3, label) && label == "\tPassage 3\n");
+  fake::resetIoCounters();
+  window.load(store, 2, visibleRows - 1);
+  assertPreviewIo(1, 3, 3, 1);
+  assert(window[0] == "Passage 2" && window[2] == "Passage 4");
+
+  fake::resetIoCounters();
+  fake::failRead = 1;
+  window.load(store, 0, visibleRows);
+  assertPreviewIo(1, 4, 4, 1);
+  assert(window[0] == "Passage 0" && window[1].empty() && window[2] == "Passage 2" && window[3] == "Passage 3");
+  fake::resetIoCounters();
+  window.load(store, 0, visibleRows);
+  assertPreviewIo(1, 4, 4, 1);
+  assert(window[1] == "Passage 1");
+
+  fake::resetIoCounters();
+  fake::failOpenPath = path();
+  window.load(store, 2, visibleRows);
+  assertPreviewIo(1, 0, 0, 0);
+  for (size_t i = 0; i < visibleRows; ++i) assert(window[i].empty());
+  fake::resetIoCounters();
+  window.load(store, 2, visibleRows);
+  assertPreviewIo(1, 4, 4, 1);
+  assert(window[0] == "Passage 2" && window[1] == "Passage 3");
+
+  fake::failWrite = 0;
+  assert(!store.removeClippingAt(3));
+  fake::resetIoCounters();
+  window.load(store, 2, visibleRows);
+  assertPreviewIo(0, 0, 0, 0);
+  assert(window[1] == "Passage 3");
+
+  assert(store.removeClippingAt(3));
+  window.invalidate();
+  fake::resetIoCounters();
+  window.load(store, 2, visibleRows);
+  assertPreviewIo(1, 3, 3, 1);
+  assert(window[0] == "Passage 2" && window[1] == "Passage 4" && window[2] == "Passage 5" && window[3].empty());
+  fake::resetIoCounters();
+  window.load(store, 2, visibleRows);
+  assertPreviewIo(0, 0, 0, 0);
+  assert(store.readClippingText(3, label) && label == "\tPassage 4\n");
+
+  fake::resetIoCounters();
+  window.load(store, 5, 1);
+  assert(window[0].empty());
+  assertPreviewIo(0, 0, 0, 0);
 }
 }  // namespace
 int main() {
@@ -209,5 +306,6 @@ int main() {
   assert(!store.removeClippingAt(0));
   assert(store.clippingCount() == 2 && bytes(path()) == good);
   assert(store.saveToFile());
+  testPreviewWindow();
   reset();
 }

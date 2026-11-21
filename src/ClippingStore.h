@@ -187,6 +187,9 @@ class ClippingStore {
   bool cacheSourceRange(size_t index, uint32_t start, uint32_t end);
   bool readClippingText(size_t index, std::string& out) const;
   bool readClippingPreview(size_t index, std::string& out) const;
+  // Read consecutive previews through one short-lived handle. Failed rows are
+  // empty and the return value reports whether every row was read successfully.
+  bool readClippingPreviews(size_t first, std::string* out, size_t count) const;
   bool clippingTextMatchesEdges(const Clipping& clipping, std::string_view prefix, std::string_view suffix,
                                 bool& matches) const;
   bool readClippingText(const Clipping& clipping, std::string& out) const;
