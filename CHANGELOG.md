@@ -37,6 +37,7 @@
 
 ### Changed
 
+- The Dashboard cycles through the three most recent unfinished books or short reads.
 - Opening a BMP or PNG shows one loading notice before the picture. Dismissing the image menu restores the picture directly.
 - Touch Dashboard and Minimal Home avoid a redundant screen update when opening a book. When Home generates covers, the loading notice and its first progress bar appear together.
 - Browsing an indexed Library with many folders reuses folder positions while scrolling. Existing library indexes benefit immediately.

@@ -104,6 +104,7 @@ class HomeActivity final : public Activity {
   ScreenInsets insetsBeforeFrontlightPanel;
   uint8_t themeBeforeFrontlightPanel = 0;
   bool dashboardHeatmapBeforeFrontlightPanel = false;
+  bool lastBookWasFinished = false;
   uint8_t scaleBeforeFrontlightPanel = 0;
   uint32_t filenameFontBeforeFrontlightPanel = 0;
   uint8_t statusSizeBeforeFrontlightPanel = 0;

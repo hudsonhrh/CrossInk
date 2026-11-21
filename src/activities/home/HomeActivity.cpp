@@ -25,6 +25,7 @@
 #include "../reader/BookStatsActivity.h"
 #include "../reader/BookStatsTracking.h"
 #include "../reader/EpubReaderUtils.h"
+#include "BookActions.h"
 #include "BookmarkStore.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
@@ -528,6 +529,7 @@ int HomeActivity::getMenuItemCount() const {
 void HomeActivity::loadRecentBooks(int maxBooks) {
   recentBooks.clear();
   const auto& books = RECENT_BOOKS.getBooks();
+  const bool hideFinished = isDashboardTheme();
   recentBooks.reserve(coverGridUi ? maxBooks : std::min(static_cast<int>(books.size()), maxBooks));
 
   for (const RecentBook& storedBook : books) {
@@ -536,7 +538,8 @@ void HomeActivity::loadRecentBooks(int maxBooks) {
       break;
     }
 
-    if (RecentBooksStore::isMissing(storedBook)) {
+    if (RecentBooksStore::isMissing(storedBook) ||
+        (hideFinished && BookActions::isBookCompletedForList(storedBook.path))) {
       continue;
     }
 
@@ -1014,6 +1017,8 @@ void HomeActivity::onFrontlightPanelOpened() {
   insetsBeforeFrontlightPanel = renderer.getViewableInsets();
   themeBeforeFrontlightPanel = SETTINGS.uiTheme;
   dashboardHeatmapBeforeFrontlightPanel = SETTINGS.showReadingHeatmap;
+  // The drawer's Reading Stats editor targets the last opened EPUB, even if another card is selected.
+  lastBookWasFinished = isDashboardTheme() && BookActions::isBookCompletedForList(APP_STATE.openEpubPath);
   scaleBeforeFrontlightPanel = SETTINGS.uiScale;
   filenameFontBeforeFrontlightPanel = filenameFontSystem.fingerprint();
   statusSizeBeforeFrontlightPanel = SETTINGS.displayStatusBarTextSize;
@@ -1022,9 +1027,11 @@ void HomeActivity::onFrontlightPanelOpened() {
 }
 
 void HomeActivity::onFrontlightPanelClosed() {
+  const bool dashboardChanged =
+      isDashboardTheme() && (dashboardHeatmapBeforeFrontlightPanel != SETTINGS.showReadingHeatmap ||
+                             lastBookWasFinished != BookActions::isBookCompletedForList(APP_STATE.openEpubPath));
   if (themeBeforeFrontlightPanel != SETTINGS.uiTheme || scaleBeforeFrontlightPanel != SETTINGS.uiScale ||
-      (isDashboardTheme() && dashboardHeatmapBeforeFrontlightPanel != SETTINGS.showReadingHeatmap) ||
-      filenameFontBeforeFrontlightPanel != filenameFontSystem.fingerprint() ||
+      dashboardChanged || filenameFontBeforeFrontlightPanel != filenameFontSystem.fingerprint() ||
       statusSizeBeforeFrontlightPanel != SETTINGS.displayStatusBarTextSize ||
       insetsBeforeFrontlightPanel != renderer.getViewableInsets()) {
     // Drawer Settings keeps Home alive. Recreate its theme-specific controls,
