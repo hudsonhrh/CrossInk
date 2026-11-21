@@ -1,8 +1,20 @@
 #include "Txt.h"
 
+#include <AtomicFile.h>
 #include <FsHelpers.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
+
+#include <algorithm>
+
+namespace {
+const atomic_file::Operations progressFileOps{
+    nullptr,
+    [](void*, const char* path) { return Storage.exists(path); },
+    [](void*, const char* path) { return Storage.remove(path); },
+    [](void*, const char* from, const char* to) { return Storage.rename(from, to); },
+};
+}  // namespace
 
 Txt::Txt(std::string path, std::string cacheBasePath)
     : filepath(std::move(path)), cacheBasePath(std::move(cacheBasePath)) {
@@ -27,8 +39,13 @@ bool Txt::load() {
     return false;
   }
 
-  fileSize = file.size();
+  const uint64_t bytes = file.fileSize64();
   file.close();
+  if (bytes > UINT32_MAX) {
+    LOG_ERR("TXT", "Book is too large for 32-bit TXT offsets: %s", filepath.c_str());
+    return false;
+  }
+  fileSize = static_cast<size_t>(bytes);
 
   loaded = true;
   return true;
@@ -184,6 +201,44 @@ bool Txt::clearCache() const {
   return true;
 }
 
+int Txt::readProgress(const char* tag, uint8_t* data, const size_t capacity) const {
+  const std::string path = cachePath + "/progress.bin";
+  if (!atomic_file::recover(progressFileOps, path.c_str(), (path + ".bak").c_str())) {
+    LOG_ERR(tag, "Failed to recover TXT progress");
+    return -1;
+  }
+  if (!Storage.exists(path.c_str())) return 0;
+  HalFile file;
+  if (!Storage.openFileForRead(tag, path, file)) return -1;
+  const size_t expected = std::min(file.size(), capacity);
+  const int bytes = file.read(data, expected);
+  const bool closed = file.close();
+  if (!closed || bytes != static_cast<int>(expected)) {
+    LOG_ERR(tag, "Incomplete TXT progress read");
+    return -1;
+  }
+  return bytes;
+}
+
+bool Txt::writeProgress(const uint8_t* data, const size_t size) const {
+  const std::string path = cachePath + "/progress.bin";
+  const std::string backup = path + ".bak";
+  const std::string temporary = path + ".tmp";
+  if (!atomic_file::recover(progressFileOps, path.c_str(), backup.c_str())) {
+    LOG_ERR("TRS", "Failed to recover TXT progress before saving");
+    return false;
+  }
+  HalFile file;
+  if (!Storage.openFileForWrite("TRS", temporary, file)) return false;
+  const bool synced = file.write(data, size) == size && file.sync();
+  const bool closed = file.close();
+  if (!synced || !closed || !atomic_file::publish(progressFileOps, path.c_str(), temporary.c_str(), backup.c_str())) {
+    LOG_ERR("TRS", "Failed to publish TXT progress");
+    return false;
+  }
+  return true;
+}
+
 bool Txt::readContent(uint8_t* buffer, size_t offset, size_t length) const {
   if (!loaded) {
     return false;
@@ -194,10 +249,9 @@ bool Txt::readContent(uint8_t* buffer, size_t offset, size_t length) const {
     return false;
   }
 
-  if (!file.seek(offset)) {
-    return false;
-  }
-
-  size_t bytesRead = file.read(buffer, length);
-  return bytesRead > 0;
+  const int bytesRead = file.seek(offset) ? file.read(buffer, length) : -1;
+  const bool ok = bytesRead >= 0 && static_cast<size_t>(bytesRead) == length;
+  file.close();
+  if (!ok) LOG_ERR("TXT", "Incomplete content read at %zu (%zu bytes)", offset, length);
+  return ok;
 }

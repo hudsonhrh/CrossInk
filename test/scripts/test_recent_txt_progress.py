@@ -42,6 +42,7 @@ struct Txt {
   bool load() const { return true; }
   std::string getCachePath() const { return "/cache"; }
   uint32_t getFileSize() const { return 1000; }
+  int readProgress(const char*, uint8_t*, size_t) const;
 };
 int openFiles = 0;
 struct FsFile {
@@ -66,6 +67,11 @@ struct {
     return true;
   }
 } Storage;
+int Txt::readProgress(const char*, uint8_t* out, size_t size) const {
+  size = std::min(size, Storage.progress.size());
+  std::memcpy(out, Storage.progress.data(), size);
+  return static_cast<int>(size);
+}
 namespace serialization {
 template<class T> bool tryReadPod(FsFile& file, T& value) {
   return file.read(&value, sizeof(value)) == sizeof(value);

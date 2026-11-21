@@ -2,6 +2,8 @@
 
 #include <I18n.h>
 
+#include <utility>
+
 #include "BookStatsView.h"
 #include "EpubReaderMenuModel.h"
 #include "FilenameFontSystem.h"
@@ -91,6 +93,15 @@ void BookStatsActivity::loadDailySummary() {
   if (!halClock.isAvailable()) {
     return;
   }
+#if CROSSINK_APP_READING_HEATMAP
+  if (page == Page::History) {
+    // loadHistory already captured the local date, even if its six-month storage read failed.
+    if (historyToday.isValid()) {
+      dailySummary = DailyReadingStats::summarize(readingStatsDayIndex(historyToday), historySeconds, historyDays);
+    }
+    return;
+  }
+#endif
   ReadingStatsDateTime now;
   if (!getCurrentLocalDailyReadingDateTime(now)) {
     LOG_DBG("BookStats", "No local date for daily reading time");
@@ -104,6 +115,7 @@ void BookStatsActivity::loadDailySummary() {
 void BookStatsActivity::loadHistory() {
   ReadingStatsDateTime now;
   if (!getCurrentLocalDailyReadingDateTime(now)) {
+    historyToday.clear();
     historyDays = 0;
     return;
   }
@@ -606,11 +618,17 @@ void BookStatsActivity::loop() {
 }
 
 void BookStatsActivity::render(RenderLock&&) {
+#if CROSSINK_APP_READING_HEATMAP
+  // Only the Dashboard heatmap shortcut requests a clean first frame.
+  const auto refresh = std::exchange(cleanHistoryOnOpen, false) ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH;
+#else
+  constexpr auto refresh = HalDisplay::FAST_REFRESH;
+#endif
   if (usesNoRtcSingleScreenLayout()) {
     renderNoRtcCombinedStatsPage(renderer, &mappedInput, bookTitle, stats, progressPercent, hasEstimatedTimeLeft,
                                  estimatedTimeLeftSeconds, globalStats,
                                  showAllDevicesStats ? &allDevicesStats : nullptr, true, canSyncReadingStats());
-    renderer.displayBuffer();
+    renderer.displayBuffer(refresh);
     return;
   }
 
@@ -641,5 +659,5 @@ void BookStatsActivity::render(RenderLock&&) {
     const int pages = (showAllDevicesStats ? 3 : 2) + SETTINGS.shouldShowReadingHeatmap();
     drawPageIndicators(renderer, page == Page::History ? pages - 1 : static_cast<int>(page), pages);
   }
-  renderer.displayBuffer();
+  renderer.displayBuffer(refresh);
 }

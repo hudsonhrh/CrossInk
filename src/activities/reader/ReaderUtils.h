@@ -248,30 +248,28 @@ inline PageTurnResult detectPageTurn(const MappedInputManager& input) {
 
 enum class PageRefresh { Blocking, Async, GrayscaleBase };
 
-// One helper, blocking or deferred: the async form starts the refresh and
-// returns so the caller can overlap CPU work with the panel's refresh time.
-// Async callers must not touch the framebuffer until
-// renderer.waitRefreshComplete() and must rebuild the differential baseline
-// before the next page turn (the tiled grayscale cleanup does).
+// Consume the cadence once per presented page, including pages with their own
+// image/blanking sequence. A negative countdown is an explicit manual clean.
+inline HalDisplay::RefreshMode takePageRefreshMode(int& pagesUntilFullRefresh) {
+  if (pagesUntilFullRefresh > 1) {
+    --pagesUntilFullRefresh;
+    return HalDisplay::FAST_REFRESH;
+  }
+  const auto mode = pagesUntilFullRefresh < 0 ? manualScreenRefreshMode() : HalDisplay::HALF_REFRESH;
+  pagesUntilFullRefresh = SETTINGS.getRefreshFrequency();
+  return mode;
+}
+
+// Async callers must wait for the panel before modifying the framebuffer.
 inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntilFullRefresh,
                                     PageRefresh request = PageRefresh::Blocking) {
-  // A negative countdown is reserved for the explicit Refresh Screen shortcut.
-  // Regular cadence cleanup remains a HALF refresh at 1. The X4 retains its
-  // prior clean HALF waveform; other panels use their full waveform.
-  const auto mode = pagesUntilFullRefresh < 0    ? manualScreenRefreshMode()
-                    : pagesUntilFullRefresh <= 1 ? HalDisplay::HALF_REFRESH
-                                                 : HalDisplay::FAST_REFRESH;
+  const auto mode = takePageRefreshMode(pagesUntilFullRefresh);
   if (request == PageRefresh::Async) {
     renderer.displayBufferAsync(mode);
   } else if (request == PageRefresh::GrayscaleBase) {
-    renderer.displayGrayscaleBase(mode);
+    displayReaderGrayscaleBase(renderer, mode);
   } else {
     renderer.displayBuffer(mode);
-  }
-  if (pagesUntilFullRefresh <= 1) {
-    pagesUntilFullRefresh = SETTINGS.getRefreshFrequency();
-  } else {
-    pagesUntilFullRefresh--;
   }
 }
 

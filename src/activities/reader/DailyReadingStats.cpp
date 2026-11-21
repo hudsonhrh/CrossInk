@@ -635,7 +635,7 @@ WindowSummary summarizeWindow(const uint32_t* seconds, size_t count) {
   return summary;
 }
 
-Summary summarize(uint32_t today) {
+Summary summarize(uint32_t today, const uint32_t* windowSeconds, size_t windowDays) {
   constexpr uint32_t days = 7;
   Summary summary;
   uint64_t total = 0;
@@ -643,7 +643,9 @@ Summary summarize(uint32_t today) {
   summary.hasSevenDayAverage = today + 1 >= days;
   for (uint32_t offset = 0; offset < days && offset <= today; ++offset) {
     uint32_t seconds = 0;
-    if (!reader.secondsFor(today - offset, seconds)) {
+    if (windowSeconds && offset < windowDays) {
+      seconds = windowSeconds[windowDays - 1 - offset];
+    } else if (!reader.secondsFor(today - offset, seconds)) {
       LOG_ERR("DailyStats", "Cannot read daily counter for day %lu", static_cast<unsigned long>(today - offset));
       summary.hasSevenDayAverage = false;
       continue;

@@ -821,7 +821,10 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
     guideDotBeforeNextToken = true;
   }
 
-  if (auto breakOffsets = cjkCharacterBreakByteOffsets(word); !breakOffsets.empty()) {
+  // ASCII words without a hyphen cannot contain CJK or an explicit hyphen break.
+  const bool checkBreaks = std::any_of(word.begin(), word.end(), [](unsigned char c) { return c >= 0x80 || c == '-'; });
+  if (auto breakOffsets = checkBreaks ? cjkCharacterBreakByteOffsets(word) : std::vector<size_t>{};
+      !breakOffsets.empty()) {
     // CJK-heavy paragraphs can push hundreds of tiny tokens quickly when CSS toggles
     // inline styles. Reserve once up front to avoid repeated vector growth reallocations.
     reserveTokenCapacity(breakOffsets.size() + 1);
@@ -857,7 +860,7 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
     return;
   }
 
-  if (containsCjkBreakableCodepoint(word)) {
+  if (checkBreaks && containsCjkBreakableCodepoint(word)) {
     pushToken(std::move(word), effectiveAttachToPrevious, effectiveNoSpaceBefore, baseStyle, 0, visibleTextOffset,
               referenceTextOffset, leadingPadding);
     if (wordStartsRtl) {

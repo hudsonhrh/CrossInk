@@ -28,7 +28,7 @@ add_executable(EpubTextGrayscaleTest EpubTextGrayscaleTest.cpp FontRenderingTest
   ${REPO_ROOT}/lib/uzlib/src/tinflate.c
   ${REPO_ROOT}/lib/uzlib/src/uzlib_checksums.c)
 target_include_directories(EpubTextGrayscaleTest PRIVATE raster_stubs
-  ${REPO_ROOT}/include ${REPO_ROOT}/src/activities/reader
+  ${REPO_ROOT}/include ${REPO_ROOT}/lib/Xtc ${REPO_ROOT}/src/activities/reader
   ${REPO_ROOT}/freeink-sdk/libs/display/FreeInkDisplay/include
   ${REPO_ROOT}/lib/GfxRenderer ${REPO_ROOT}/lib/ScreenCalibration ../memory_policy/stubs
   ${REPO_ROOT}/lib/Epub ${REPO_ROOT}/lib/EpdFont ${REPO_ROOT}/lib/Memory

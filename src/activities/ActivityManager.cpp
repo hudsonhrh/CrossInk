@@ -635,6 +635,8 @@ void ActivityManager::loop() {
 }
 
 void ActivityManager::processPendingActivities() {
+  // Stats opened through the frontlight sheet can pop twice before Home paints.
+  auto restoredHomeRefresh = HalDisplay::FAST_REFRESH;
   // A deferred full-stack replace waits until its requester has popped and every
   // result handler has settled, then runs as an ordinary Replace.
   while (pendingAction != PendingAction::None || (afterReturnActivity && afterReturnOwnerExited)) {
@@ -655,6 +657,9 @@ void ActivityManager::processPendingActivities() {
       }
 
       const bool closedFrontlightPanel = currentActivity->name == "FrontlightPanel";
+#if FREEINK_DEVICE_X4PRO
+      if (currentActivity->name == "BookStats") restoredHomeRefresh = HalDisplay::HALF_REFRESH;
+#endif
       ActivityResult pendingResult = std::move(currentActivity->result);
       if (afterReturnActivity && currentActivity.get() == afterReturnOwner) {
         afterReturnOwnerExited = true;
@@ -667,7 +672,7 @@ void ActivityManager::processPendingActivities() {
 
       if (stackActivities.empty()) {
         lock.unlock();  // goHome may acquire its own lock
-        goHome();
+        goHome(HomeMenuItem::NONE, restoredHomeRefresh);
         continue;  // Will launch goHome immediately
 
       } else {
@@ -675,6 +680,9 @@ void ActivityManager::processPendingActivities() {
         stackActivities.pop_back();
         mappedInput.setMenuMode(currentActivity->usesMenuButtonOrientation());
         restoredActivityNeedsRender = true;
+#if FREEINK_DEVICE_X4PRO
+        if (restoredHomeRefresh != HalDisplay::FAST_REFRESH) currentActivity->setRestoreRefreshMode(restoredHomeRefresh);
+#endif
 
         // A file-transfer child may have released UI fonts. Restore them for
         // any parent (including Settings) before its first measurement/redraw.
@@ -1213,7 +1221,14 @@ void ActivityManager::goToFullScreenMessage(std::string message, EpdFontFamily::
   replaceActivity(std::make_unique<FullScreenMessageActivity>(renderer, mappedInput, std::move(message), style));
 }
 
-void ActivityManager::goHome(HomeMenuItem initialMenuItem, const HalDisplay::RefreshMode initialRefreshMode) {
+void ActivityManager::goHome(HomeMenuItem initialMenuItem, HalDisplay::RefreshMode initialRefreshMode) {
+#if FREEINK_DEVICE_X4PRO
+  // Erase the dense statistics grids on Back and on the global Home gesture.
+  // Home consumes this on its first paint, then resumes fast updates.
+  if (initialRefreshMode == HalDisplay::FAST_REFRESH && currentActivity && currentActivity->name == "BookStats") {
+    initialRefreshMode = HalDisplay::HALF_REFRESH;
+  }
+#endif
   std::string initialBookPath;
   if (returningHomeThroughSettings) {
     initialBookPath = std::move(preferredHomeBookPath);

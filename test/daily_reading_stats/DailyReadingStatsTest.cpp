@@ -154,6 +154,49 @@ TEST_F(DailyReading, SevenDaySummaryLoadsEachMonthOnceAndKeepsTodayIfPriorMonthF
   EXPECT_EQ(partial.todaySeconds, 217u);
   EXPECT_FALSE(partial.hasSevenDayAverage);
 }
+TEST_F(DailyReading, HeatmapSummaryMatchesStorageAcrossLeapDayAndIncludesPendingSeconds) {
+  const ReadingStatsDate date{2024, 3, 1};
+  const uint32_t today = readingStatsDayIndex(date);
+  ASSERT_TRUE(write(today - 7, {670, 0}));  // Not in the average.
+  ASSERT_TRUE(write(today - 2, {UINT32_MAX, 0}));
+  ASSERT_TRUE(write(today - 1, {UINT32_MAX, 0}));
+  ASSERT_TRUE(record(today, 37));
+  std::array<uint32_t, MAX_SIX_MONTH_DAYS> window{};
+  const size_t count = sixMonthDayCount(date);
+  ASSERT_TRUE(loadWindow(date, window.data(), count));
+  const auto disk = summarize(today);
+  faults.readOpens = 0;
+  const auto cached = summarize(today, window.data(), count);
+  EXPECT_EQ(faults.readOpens, 0u);
+  EXPECT_TRUE(cached.hasToday && cached.hasSevenDayAverage);
+  EXPECT_EQ(cached.todaySeconds, 37u);
+  EXPECT_EQ(cached.sevenDayAverageSeconds, (2ull * UINT32_MAX + 37) / 7);
+  EXPECT_EQ(cached.todaySeconds, disk.todaySeconds);
+  EXPECT_EQ(cached.sevenDayAverageSeconds, disk.sevenDayAverageSeconds);
+}
+TEST_F(DailyReading, HeatmapSummaryHandlesEpochAndIgnoresIncompleteReadOutput) {
+  const ReadingStatsDate date{2000, 1, 3};
+  const uint32_t today = readingStatsDayIndex(date);
+  ASSERT_TRUE(write(today - 1, {14, 0}));
+  std::array<uint32_t, 3> window{};
+  ASSERT_EQ(window.size(), sixMonthDayCount(date));
+  ASSERT_TRUE(loadWindow(date, window.data(), window.size()));
+  faults.readOpens = 0;
+  const auto cached = summarize(today, window.data(), window.size());
+  EXPECT_EQ(faults.readOpens, 0u);
+  EXPECT_TRUE(cached.hasToday);
+  EXPECT_EQ(cached.todaySeconds, 0u);
+  EXPECT_FALSE(cached.hasSevenDayAverage);
+  EXPECT_EQ(cached.sevenDayAverageSeconds, 2u);
+
+  window.fill(999);
+  const auto fallback = summarize(today, window.data(), 0);
+  EXPECT_GT(faults.readOpens, 0u);
+  EXPECT_TRUE(fallback.hasToday);
+  EXPECT_FALSE(fallback.hasSevenDayAverage);
+  EXPECT_EQ(fallback.todaySeconds, cached.todaySeconds);
+  EXPECT_EQ(fallback.sevenDayAverageSeconds, cached.sevenDayAverageSeconds);
+}
 TEST_F(DailyReading, LocalOffsetAndDateValidation) {
   ReadingStatsDateTime out;
   SETTINGS.clockUtcOffsetQ = 47;

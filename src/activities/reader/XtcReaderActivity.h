@@ -21,6 +21,7 @@
 #include "GlobalReadingStats.h"
 #include "PluginReaderEvents.h"
 #include "ReaderButtonShortcuts.h"
+#include "ReaderGrayscale.h"
 #include "ReaderProgressSaveDebouncer.h"
 #include "ReadingSessionJournal.h"
 #include "ReadingSessionStats.h"
@@ -40,6 +41,7 @@ class XtcReaderActivity final : public Activity {
 
   uint32_t currentPage = 0;
   int pagesUntilFullRefresh = 0;
+  ReaderUtils::PageToneHistory pageToneHistory;
   unsigned long lastPageTurnTime = 0UL;
   unsigned long pageShownAtMs = 0UL;
   uint32_t sessionReadingSeconds = 0;

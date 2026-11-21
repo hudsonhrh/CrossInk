@@ -1,5 +1,6 @@
 add_executable(XtcParserTest
   XtcParserTest.cpp
+  XtchCoverBandTest.cpp
   ${REPO_ROOT}/lib/Xtc/Xtc/XtcParser.cpp
 )
 target_include_directories(XtcParserTest PRIVATE

@@ -24,6 +24,7 @@ class Xtc {
   std::string cachePath;
   std::unique_ptr<xtc::XtcParser> parser;
   bool loaded;
+  bool coverCacheReady = true;
 
  public:
   explicit Xtc(std::string filepath, const std::string& cacheDir) : filepath(std::move(filepath)), loaded(false) {
@@ -106,6 +107,7 @@ class Xtc {
 
   // Page access
   uint32_t getPageCount() const;
+  bool getPageInfo(uint32_t pageIndex, xtc::PageInfo& info) const;
   uint16_t getPageWidth() const;
   uint16_t getPageHeight() const;
   uint8_t getBitDepth() const;  // 1 = XTC (1-bit), 2 = XTCH (2-bit)

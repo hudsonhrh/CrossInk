@@ -44,11 +44,32 @@
 #include "fontIds.h"
 #include "images/Logo120.h"
 #include "images/MoonIcon.h"
+#include "util/X4ProRefresh.h"
 
 namespace {
 
 constexpr bool TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH = true;
 constexpr int sleepBuildInfoSideMargin = 20;
+
+bool needsSleepImageScrub(bool direct) {
+#if FREEINK_DEVICE_X4PRO && !defined(SIMULATOR)
+  const auto mode = direct ? HalDisplay::GrayscaleMode::Direct : HalDisplay::GrayscaleMode::Absolute;
+  return display.grayscaleCapabilities(mode).base == HalDisplay::GrayscaleBase::Combined;
+#else
+  (void)direct;
+  return false;
+#endif
+}
+
+bool beginSleepImageGrayscale(const GfxRenderer& renderer, bool direct) {
+  // Combined gray writes replace both controller RAM planes without first
+  // erasing the page or the sleep popup visible on the glass. Present a clean
+  // BW base before uploading either plane; the single framebuffer remains
+  // available for Page Overlay's background. Separate-base drivers already
+  // present their own BW intermediate.
+  if (needsSleepImageScrub(direct)) renderer.displayBuffer(x4ProCleanRefreshMode(display, HalDisplay::HALF_REFRESH));
+  return direct ? renderer.displayDirectGrayscaleBase() : renderer.displayAbsoluteGrayscaleBase();
+}
 
 ImageToneProfile bookCoverToneProfile(const GfxRenderer& renderer) {
   if (SETTINGS.sleepScreenCoverFilter != CrossPointSettings::NO_FILTER) return ImageToneProfile::Legacy;
@@ -631,10 +652,24 @@ void SleepActivity::onEnter() {
 }
 
 void SleepActivity::showSleepPopup() {
+  const bool quickResume = SETTINGS.usesQuickResumeSleep(fromTimeout);
+  const auto mode = SETTINGS.sleepScreen;
+  const bool replacesPage = mode == CrossPointSettings::CUSTOM || mode == CrossPointSettings::COVER ||
+                            mode == CrossPointSettings::COVER_CUSTOM;
+  // Identify the physical panel independently of its current grayscale capabilities,
+  // which are temporarily restricted while the outgoing page is inverted.
+  if (!quickResume && replacesPage && x4ProCleanRefreshMode(display).has_value()) {
+    // Use the existing feedback refresh to erase the outgoing page. Putting a popup
+    // over that page holds its ink on the glass until the final artwork scrub.
+    // Keep the current polarity: toggling it here would promote FAST to HALF in Night Mode.
+    renderer.clearScreen(display.isInverted() ? 0x00 : 0xFF);
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    sleepPopupShown = true;
+    return;
+  }
   const auto orientation = renderer.getOrientation();
   if (APP_STATE.lastSleepFromReader) renderer.setOrientation(sleepPopupOrientation);
   // Leave only the panel showing the popup when the final screen needs these pixels.
-  const bool quickResume = SETTINGS.usesQuickResumeSleep(fromTimeout);
   const bool overlay = SETTINGS.sleepScreen == CrossPointSettings::OVERLAY && !quickResume;
   const char* message = tr(STR_ENTERING_SLEEP);
   if (GUI.drawPopup(renderer, message, overlay || quickResume).width > 0) {
@@ -877,23 +912,21 @@ bool SleepActivity::renderBitmapSleepScreen(Bitmap& bitmap) const {
   const bool absolute = renderer.supportsAbsoluteGrayscale();
   const bool direct = absolute && renderer.supportsDirectGrayscale();
 
-  // Direct grayscale consumes only the two complete gray planes. Other modes
-  // still need the B/W base, so only Direct can skip this extra image decode.
-  if (!hasGreyscale || !direct) {
+  // Full-plane gray sleep images on X4 Pro use the cleared white frame to
+  // erase old ink. Their two plane draws contain the complete artwork.
+  const bool combinedBase = direct || (absolute && needsSleepImageScrub(direct));
+  if (!hasGreyscale || !combinedBase) {
     if (!drawSleepBitmap(bitmap, placement)) return false;
   }
 
   if (!hasGreyscale) {
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
+    renderer.displayBuffer(x4ProCleanRefreshMode(display, HalDisplay::HALF_REFRESH), TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
     monochromeFrame = true;
     return true;
   }
 
-  // Prefer the Direct waveform where the panel implements it: it folds the B/W
-  // base into the grayscale pass rather than pushing a separate base refresh
-  // first. Cover tone selection is independent of the panel refresh mode.
   if (absolute) {
-    if (!(direct ? renderer.displayDirectGrayscaleBase() : renderer.displayAbsoluteGrayscaleBase())) return false;
+    if (!beginSleepImageGrayscale(renderer, direct)) return false;
   } else {
     renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
   }
@@ -1197,8 +1230,7 @@ void SleepActivity::renderOverlaySleepScreen(Bitmap* cover) const {
     }
     if (cover && cover->hasGreyscale() && SETTINGS.sleepScreenCoverFilter == CrossPointSettings::NO_FILTER &&
         renderer.supportsAbsoluteGrayscale() &&
-        (renderer.supportsDirectGrayscale() ? renderer.displayDirectGrayscaleBase()
-                                            : renderer.displayAbsoluteGrayscaleBase())) {
+        beginSleepImageGrayscale(renderer, renderer.supportsDirectGrayscale())) {
       bool success = true;
       for (const auto mode : {GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
         renderer.setRenderMode(mode);
@@ -1304,8 +1336,7 @@ void SleepActivity::renderOverlaySleepScreen(Bitmap* cover) const {
 
     const bool absolute = renderer.supportsAbsoluteGrayscale();
     if (!absolute) return OverlayDrawResult::Drawn;
-    if (!(renderer.supportsDirectGrayscale() ? renderer.displayDirectGrayscaleBase()
-                                             : renderer.displayAbsoluteGrayscaleBase())) {
+    if (!beginSleepImageGrayscale(renderer, renderer.supportsDirectGrayscale())) {
       return OverlayDrawResult::Drawn;
     }
 
@@ -1433,7 +1464,8 @@ void SleepActivity::renderOverlaySleepScreen(Bitmap* cover) const {
   // over the sleep image.
   const bool shouldRunGrayscalePass = shouldUseReaderPageBackground && backgroundSupportsGrayscale && !overlayDrawn &&
                                       (backgroundWasRebuilt || (overlayBackgroundAvailable && !path.empty()));
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH, !shouldRunGrayscalePass && TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
+  renderer.displayBuffer(x4ProCleanRefreshMode(display, HalDisplay::HALF_REFRESH),
+                         !shouldRunGrayscalePass && TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
 
   if (!shouldRunGrayscalePass) {
     return;

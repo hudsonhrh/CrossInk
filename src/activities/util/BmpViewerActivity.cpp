@@ -145,6 +145,10 @@ bool BmpViewerActivity::renderPngImage() {
 void BmpViewerActivity::onEnter() {
   Activity::onEnter();
 
+  {
+    RenderLock lock(*this);
+    GUI.drawPopup(renderer, tr(STR_LOADING));
+  }
   if (siblingImages.empty() && !filePath.empty()) {
     loadSiblingImages();
   }
@@ -171,8 +175,10 @@ void BmpViewerActivity::drawImage() {
 
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
-  Rect popupRect = GUI.drawPopup(renderer, tr(STR_LOADING));
-  GUI.fillPopupProgress(renderer, popupRect, 20);  // Initial 20% progress
+  if (loadingNoticePending) {
+    GUI.drawPopup(renderer, tr(STR_LOADING));
+    loadingNoticePending = false;
+  }
 
   if (FsHelpers::hasPngExtension(filePath)) {
     renderPngImage();
@@ -213,8 +219,6 @@ void BmpViewerActivity::drawImage() {
 
       const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SET_SLEEP_COVER),
                                                 (hasPrevious ? "<" : nullptr), (hasNext ? ">" : nullptr));
-
-      GUI.fillPopupProgress(renderer, popupRect, 50);
 
       const auto drawFrame = [&]() {
         if (!renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight)) return false;
@@ -467,6 +471,7 @@ void BmpViewerActivity::loop() {
       RenderLock lock(*this);
       currentImageIndex = nextIndex;
       filePath = dirPath + siblingImages[currentImageIndex];
+      loadingNoticePending = true;
     }
     requestImageRedraw();
     return true;

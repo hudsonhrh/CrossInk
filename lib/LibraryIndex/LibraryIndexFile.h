@@ -128,6 +128,11 @@ class LibraryIndexFile {
     uint8_t nameLen = 0;
     uint16_t fieldOffsets[5]{};
     uint8_t fieldCount = 0;
+    // Remember offsets as the folder section is walked. Small libraries get a
+    // direct lookup; large ones share the same bounded set of checkpoints.
+    static constexpr uint16_t FOLDER_BLOCKS = 24;
+    uint8_t knownFolderBlocks = 0;
+    uint32_t folderStarts[FOLDER_BLOCKS]{};
   };
   static_assert(sizeof(DisplayRowCache) <= 1800);
   bool ensureDisplayRowCache();

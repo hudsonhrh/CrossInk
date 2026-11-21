@@ -766,7 +766,8 @@ void BaseTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
   }
 }
 
-Rect BaseTheme::drawPopup(const GfxRenderer& renderer, const char* message, const bool preserveBackdrop) const {
+Rect BaseTheme::drawPopup(const GfxRenderer& renderer, const char* message, const bool preserveBackdrop,
+                          const int initialProgress) const {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int marginX = metrics.popupMarginX;
   const int marginY = metrics.popupMarginY;
@@ -812,12 +813,17 @@ Rect BaseTheme::drawPopup(const GfxRenderer& renderer, const char* message, cons
   const int textX = x + (w - textWidth) / 2;
   const int textY = y + marginY + metrics.popupTextBaselineOffsetY;
   renderer.drawText(UI_12_FONT_ID, textX, textY, visible.c_str(), metrics.popupTextInverted, popupFontFamily);
-  renderer.displayBuffer();
+  const Rect layout{x, y, w, h};
+  if (initialProgress >= 0) {
+    fillPopupProgress(renderer, layout, initialProgress);
+  } else {
+    renderer.displayBuffer();
+  }
   if (backdrop) {
     renderer.copyBufferToRegion(backupX, backupY, backupW, backupH, backdrop.get(),
                                 renderer.getRegionByteSize(backupX, backupY, backupW, backupH));
   }
-  return Rect{x, y, w, h};
+  return layout;
 }
 
 void BaseTheme::fillPopupProgress(const GfxRenderer& renderer, const Rect& layout, const int progress) const {

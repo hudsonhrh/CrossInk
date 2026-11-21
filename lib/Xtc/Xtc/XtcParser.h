@@ -109,6 +109,7 @@ class XtcParser {
   size_t m_streamChunkSize = 0;
 
   // Internal helper functions
+  XtcError seekPageBitmap(uint32_t pageIndex, size_t& bitmapSize);
   XtcError readHeader();
   XtcError readFirstPageInfo();
   XtcError readTitle();

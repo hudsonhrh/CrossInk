@@ -256,3 +256,89 @@ TEST_F(TextLayoutBackingTest, SourceRangesSurviveCacheRoundTrip) {
   EXPECT_EQ(restored->wordSourceRange(1).start, 25U);
   EXPECT_EQ(restored->wordSourceRange(1).end, 31U);
 }
+
+#ifndef PSRAM_REFERENCE
+TEST_F(TextLayoutBackingTest, ReadsCachedLineMetadataInBatchesAndPreservesItsWireFormat) {
+  BlockStyle style;
+  style.alignment = CssTextAlign::Center;
+  style.textAlignDefined = true;
+  style.marginTop = 11;
+  style.marginBottom = -12;
+  style.marginLeft = 13;
+  style.marginRight = 14;
+  style.paddingTop = 15;
+  style.paddingBottom = 16;
+  style.paddingLeft = 17;
+  style.paddingRight = 18;
+  style.textIndent = -19;
+  style.isRtl = true;
+  style.directionDefined = true;
+  style.fontSize = 16;
+  style.lineHeight = 39;
+  style.ruledTextOffset = -3;
+
+  TextBlock line({"Alpha", "beta"}, {20, 99}, {EpdFontFamily::BOLD, EpdFontFamily::REGULAR}, {1, 0}, {6, 0}, {4, 0},
+                 {1, 0}, {false, true}, style, {}, {0, 16}, "", -2, {}, {{0, 5}, {6, 10}});
+  FsFile output;
+  ASSERT_TRUE(Storage.openFileForWrite("test", "original", output));
+  ASSERT_TRUE(line.serialize(output));
+  output.close();
+
+  auto& original = Storage.data("original");
+  FsFile input;
+  ASSERT_TRUE(Storage.openFileForRead("test", "original", input));
+  auto restored = TextBlock::deserialize(input);
+  ASSERT_NE(restored, nullptr);
+  EXPECT_EQ(input.available(), 0);
+  EXPECT_EQ(original.readCalls, 5U);  // header, word arena, publisher flag, ruby count, style
+  ASSERT_TRUE(Storage.openFileForWrite("test", "restored", output));
+  ASSERT_TRUE(restored->serialize(output));
+  output.close();
+  EXPECT_EQ(Storage.bytes("restored"), original.bytes);
+
+  for (size_t length = 0; length < original.bytes.size(); ++length) {
+    SCOPED_TRACE(length);
+    original.readFailAt = length;
+    ASSERT_TRUE(input.seek(0));
+    EXPECT_EQ(TextBlock::deserialize(input), nullptr);
+  }
+  input.close();
+}
+
+TEST_F(TextLayoutBackingTest, CorruptStyleFlagsAndRubyRecordsAreRejected) {
+  TextBlock line({"one", "two"}, {0, 30}, {EpdFontFamily::REGULAR, EpdFontFamily::REGULAR}, {}, {}, {}, {}, {},
+                 BlockStyle{}, {"ruby-first", "ruby-second"});
+  FsFile file;
+  ASSERT_TRUE(Storage.openFileForWrite("test", "ruby", file));
+  ASSERT_TRUE(line.serialize(file));
+  file.close();
+  auto& bytes = Storage.data("ruby").bytes;
+  const auto original = bytes;
+  const std::string first = "ruby-first", second = "ruby-second";
+  const auto find = [&](const std::string& label) {
+    return static_cast<size_t>(std::search(original.begin(), original.end(), label.begin(), label.end()) - original.begin());
+  };
+  const auto firstText = find(first), secondText = find(second);
+  ASSERT_LT(firstText, bytes.size());
+  ASSERT_LT(secondText, bytes.size());
+  const auto style = secondText + second.size();
+  ASSERT_LT(style + 1, bytes.size());
+  ASSERT_TRUE(Storage.openFileForRead("test", "ruby", file));
+  ASSERT_NE(TextBlock::deserialize(file), nullptr);
+  for (const auto offset : {style, style + 1, secondText - sizeof(uint32_t) - sizeof(uint16_t), firstText - sizeof(uint32_t)}) {
+    SCOPED_TRACE(offset);
+    bytes = original;
+    if (offset == style || offset == style + 1) bytes[offset] = 0xff;
+    else if (offset < firstText) {
+      // A 1 MiB ruby string in a file of only a few bytes. Validate before allocating.
+      const uint32_t badLength = 1U << 20;
+      memcpy(bytes.data() + offset, &badLength, sizeof(badLength));
+    } else {
+      bytes[offset] = 0; // Record two now overwrites record one's word.
+    }
+    ASSERT_TRUE(file.seek(0));
+    EXPECT_EQ(TextBlock::deserialize(file), nullptr);
+  }
+  file.close();
+}
+#endif

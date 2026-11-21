@@ -1,7 +1,11 @@
 add_executable(SectionPersistenceTest
+  BookMetadataTocIndexTest.cpp
+  ${REPO_ROOT}/lib/Serialization/AtomicFile.cpp
   SectionPersistenceTest.cpp
   EpubProgressPersistenceTest.cpp
   SectionPersistenceLinkStubs.cpp
+  ${REPO_ROOT}/lib/Epub/Epub/BookMetadataCache.cpp
+  ${REPO_ROOT}/lib/Utf8/Utf8.cpp
   ${REPO_ROOT}/lib/Epub/Epub/Section.cpp
   ${REPO_ROOT}/lib/Epub/Epub/css/CssParser.cpp
 )
@@ -24,6 +28,7 @@ target_include_directories(SectionPersistenceTest PRIVATE
   ${REPO_ROOT}/lib/Serialization
   ${REPO_ROOT}/lib/Utf8
   ${REPO_ROOT}/lib/XmlParserUtils
+  ${REPO_ROOT}/test/content_opf_parser/stubs
 )
 
 target_link_libraries(SectionPersistenceTest PRIVATE

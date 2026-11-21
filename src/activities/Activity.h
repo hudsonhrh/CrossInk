@@ -78,6 +78,10 @@ class Activity {
   // Lists use spatial menu directions; text-selection/keyboard screens keep their own navigation rules.
   virtual bool usesMenuButtonOrientation() const { return !isBookReaderActivity(); }
   virtual bool isHomeActivity() const { return false; }
+#if FREEINK_DEVICE_X4PRO
+  // Apply a stronger refresh to the first paint when restoring a screen from the stack.
+  virtual void setRestoreRefreshMode(HalDisplay::RefreshMode) {}
+#endif
   // The open book uses its vertical swipe actions across the entire page;
   // dialogs and lists retain their normal edge or scroll gestures.
   virtual bool usesFullScreenReaderVerticalSwipes() const { return false; }

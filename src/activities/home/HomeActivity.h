@@ -164,6 +164,11 @@ class HomeActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+#if FREEINK_DEVICE_X4PRO
+  void setRestoreRefreshMode(HalDisplay::RefreshMode mode) override {
+    if (initialRefreshMode == HalDisplay::FAST_REFRESH) initialRefreshMode = mode;
+  }
+#endif
   bool isHomeActivity() const override { return true; }
   bool allowPowerAsConfirmInReaderMode() const override { return quickActionsPopup.isActive(); }
   bool blocksGlobalInput() const override { return quickActionsPopup.isActive(); }

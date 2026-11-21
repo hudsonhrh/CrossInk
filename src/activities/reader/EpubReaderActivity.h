@@ -31,6 +31,7 @@
 #include "ManualPageTurnQueue.h"
 #include "PluginReaderEvents.h"
 #include "ReaderButtonShortcuts.h"
+#include "ReaderGrayscale.h"
 #include "ReaderProgressSaveDebouncer.h"
 #include "ReadingSessionJournal.h"
 #include "ReadingSessionStats.h"
@@ -156,6 +157,7 @@ class EpubReaderActivity final : public Activity {
   std::string pendingFootnotePreviewAnchor;
   bool activeFootnotePreview = false;
   int pagesUntilFullRefresh = 0;
+  ReaderUtils::PageToneHistory pageToneHistory;
   // A Sync Progress return can leave non-reader UI on the panel. This is a
   // one-shot clean base for its first image page; normal image-page cleanup
   // uses pagesUntilFullRefresh independently.

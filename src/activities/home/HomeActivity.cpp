@@ -403,13 +403,12 @@ std::string carouselCachePath(int bookIdx) {
   return path;
 }
 
-void invalidateCarouselDiskCache() {
+bool invalidateCarouselDiskCache() {
+  const auto removeIfPresent = [](const char* path) { return !Storage.exists(path) || Storage.remove(path); };
   for (int i = 0; i < HomeActivity::kMaxCachedBooks; ++i) {
-    const std::string path = carouselCachePath(i);
-    if (Storage.exists(path.c_str())) Storage.remove(path.c_str());
+    if (!removeIfPresent(carouselCachePath(i).c_str())) return false;
   }
-  if (Storage.exists(LEGACY_CAROUSEL_CACHE_PATH)) Storage.remove(LEGACY_CAROUSEL_CACHE_PATH);
-  if (Storage.exists(CAROUSEL_CACHE_TMP_PATH)) Storage.remove(CAROUSEL_CACHE_TMP_PATH);
+  return removeIfPresent(LEGACY_CAROUSEL_CACHE_PATH) && removeIfPresent(CAROUSEL_CACHE_TMP_PATH);
 }
 
 bool isCarouselCacheHeaderValid(const CarouselCacheHeader& header, uint64_t cacheKeyHash, int bookCount,
@@ -576,12 +575,13 @@ bool HomeActivity::loadCoverGridThumbnails() {
       thumbFile.close();
       if (matches) continue;
     }
+    const int progress = static_cast<int>(100 * i / std::max<size_t>(1, recentBooks.size()));
     if (!showingLoading) {
       showingLoading = true;
-      popupRect = GUI.drawPopup(renderer, tr(STR_LOADING));
+      popupRect = GUI.drawPopup(renderer, tr(STR_LOADING), false, progress);
+    } else {
+      GUI.fillPopupProgress(renderer, popupRect, progress);
     }
-    // fillPopupProgress() refreshes the panel itself.
-    GUI.fillPopupProgress(renderer, popupRect, static_cast<int>(100 * i / std::max<size_t>(1, recentBooks.size())));
     if (FsHelpers::hasEpubExtension(book.path)) {
       auto epub = makeUniqueNoThrow<Epub>(book.path, "/.crosspoint");
       if (!epub) {
@@ -623,6 +623,7 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
   Rect popupRect;
   // Every thumbnail generation path shows progress before its ZIP/image work.
   auto showLoadingProgress = [&](const int value) {
+    const int percent = std::clamp(value, 0, 100);
     if (!showingLoading) {
       showingLoading = true;
       // Thumbnail generation may need a 32 KB contiguous inflate buffer. The
@@ -633,9 +634,10 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
         freeCoverBuffer();
         coverRendered = false;
       }
-      popupRect = GUI.drawPopup(renderer, tr(STR_LOADING));
+      popupRect = GUI.drawPopup(renderer, tr(STR_LOADING), false, percent);
+    } else {
+      GUI.fillPopupProgress(renderer, popupRect, percent);
     }
-    GUI.fillPopupProgress(renderer, popupRect, std::clamp(value, 0, 100));  // refreshes the panel itself
   };
 
   const bool isCarouselTheme =
@@ -650,6 +652,7 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
   std::array<char, kMaxCachedBooks> bookUpdated{};
   const int progressIncrement = 90 / static_cast<int>(std::max<size_t>(1, recentBookCount));
 
+  bool carouselDiskCacheCleared = false;
   int progress = 0;
   for (size_t bookIdx = 0; bookIdx < recentBookCount; ++bookIdx) {
     RecentBook& book = recentBooks[bookIdx];
@@ -669,7 +672,17 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
         const bool centerMissing = !Storage.exists(centerPath.c_str());
         const bool sideMissing = !Storage.exists(sidePath.c_str());
 
-        if (centerMissing || sideMissing) {
+        if ((centerMissing || sideMissing) &&
+            (FsHelpers::hasEpubExtension(book.path) || FsHelpers::hasXtcExtension(book.path))) {
+          // The snapshot key only sees thumbnail presence. Retire the old frames before publishing
+          // the last missing thumbnail; a reset between those operations must still force a redraw.
+          if (!carouselDiskCacheCleared) {
+            if (!invalidateCarouselDiskCache()) {
+              LOG_ERR("HOME", "Failed to invalidate cached carousel artwork");
+              break;
+            }
+            carouselDiskCacheCleared = true;
+          }
           if (FsHelpers::hasEpubExtension(book.path)) {
             Epub epub(book.path, "/.crosspoint");
             showLoadingProgress(10 + progress * progressIncrement);
@@ -777,7 +790,6 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
   if (isCarouselTheme && std::any_of(bookUpdated.begin(), bookUpdated.end(), [](char updated) { return updated; })) {
     // A changed cover affects the centre and side artwork in every position.
     // Rebuild only the viewed position; other positions remain lazy.
-    invalidateCarouselDiskCache();
     freeCarouselFrames();
     gCarouselCache.invalidate();
     preRenderCarouselFrames();
@@ -1570,20 +1582,18 @@ void HomeActivity::loop() {
       minimalHomeNavIndex = homeNavCount - 1;
     }
 
-    // Touch readers do not show the front-button hints, so retain their
-    // existing side-button handling without moving the non-touch hint focus.
+    // Touch Home hides the front-button hints. Keep their selection for a
+    // change of input mode without repainting the same image on every press.
     if (mappedInput.hasTouch()) {
       if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
         minimalHomeNavIndex = minimalHomeNavIndex < 0
                                   ? homeNavCount - 1
                                   : ButtonNavigator::previousIndex(minimalHomeNavIndex, homeNavCount);
-        requestUpdate();
         return;
       }
       if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
         minimalHomeNavIndex =
             minimalHomeNavIndex < 0 ? 0 : ButtonNavigator::nextIndex(minimalHomeNavIndex, homeNavCount);
-        requestUpdate();
         return;
       }
     }
@@ -1609,18 +1619,12 @@ void HomeActivity::loop() {
 
     int touchedHomeNav = -1;
     if (mappedInput.wasItemTouchedDown(touchedHomeNav) && touchedHomeNav >= 0 && touchedHomeNav < homeNavCount) {
-      if (minimalHomeNavIndex != touchedHomeNav) {
-        minimalHomeNavIndex = touchedHomeNav;
-        requestUpdate();
-      }
+      minimalHomeNavIndex = touchedHomeNav;
       return;
     }
     int touchedBookIndex = -1;
     if (mappedInput.wasCoverTouchedDown(touchedBookIndex) && touchedBookIndex >= 0 && !recentBooks.empty()) {
-      if (minimalHomeNavIndex != 3) {
-        minimalHomeNavIndex = 3;
-        requestUpdate();
-      }
+      minimalHomeNavIndex = 3;
       return;
     }
     if (mappedInput.wasItemTapped(touchedHomeNav)) {
@@ -2044,7 +2048,7 @@ bool HomeActivity::handleShortcutAction(const CrossPointSettings::SHORT_PWRBTN a
         if (selectedAction == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH) {
           // OptionPopup has already dismissed itself. Repaint Home before flushing
           // so the full refresh cannot preserve the popup in the panel image.
-          initialRefreshMode = HalDisplay::FULL_REFRESH;
+          initialRefreshMode = x4ProCleanRefreshMode(display, HalDisplay::FULL_REFRESH);
           requestUpdate();
           return;
         }

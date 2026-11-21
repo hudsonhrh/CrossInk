@@ -35,6 +35,9 @@ class BookStatsActivity final : public Activity {
   uint32_t estimatedTimeLeftSeconds = 0;
   GfxRenderer::Orientation previousOrientation = GfxRenderer::Orientation::Portrait;
   Page page = Page::PerBook;
+#if CROSSINK_APP_READING_HEATMAP
+  bool cleanHistoryOnOpen = false;
+#endif
   int selectedEditField = 0;
   bool didChangeStats = false;
   BookReadingStats dateEditStatsSnapshot;
@@ -71,7 +74,10 @@ class BookStatsActivity final : public Activity {
  public:
 #if CROSSINK_APP_READING_HEATMAP
   void openHistoryPage() {
-    if (SETTINGS.shouldShowReadingHeatmap()) page = Page::History;
+    if (SETTINGS.shouldShowReadingHeatmap()) {
+      page = Page::History;
+      cleanHistoryOnOpen = true;
+    }
   }
   void onFrontlightPanelClosed() override;
 #endif

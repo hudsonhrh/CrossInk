@@ -102,10 +102,11 @@ Version 5 adds signed `characterSpacing` (-5..5) after the source file size in t
 
 ## TXT `progress.bin`
 
-Each TXT cache stores a six-byte progress record: a little-endian `u16` page
-number followed by a little-endian `u32` source-file byte offset. The format is
-unchanged. A save during font reindexing writes `0xFFFFFFFF` for an unknown
-offset, retaining the page number and compatibility with older readers.
+Each TXT cache stores a six-byte progress record containing a little-endian
+`u16` page number followed by a little-endian `u32` source-file byte offset.
+The reader saves the last page it displayed, including during a font reindex.
+It syncs and closes `progress.bin.tmp` before replacing the primary file and
+recovers `progress.bin.bak` if power is lost during replacement.
 
 Reopening prefers an in-range offset to preserve text position when the status
 bar geometry changed while the book was closed. Offset zero is valid only for
@@ -500,7 +501,9 @@ struct PayloadHeader {           // 32 bytes, then the four strings back to back
 ### Version 10
 
 `book.bin` stores EPUB metadata plus lookup tables for spine and TOC entries.
-The current firmware writes this version from `BookMetadataCache`.
+The current firmware writes this version from `BookMetadataCache`. It syncs and closes
+`book.bin.tmp` before publication. If replacement is interrupted, the next open
+restores the previous complete index from `book.bin.bak` when present.
 Version 10 rebuilds metadata with namespace-aware OPF parsing so optimizer-generated
 XML prefixes do not leave an empty chapter list. The binary layout is unchanged.
 Version 9 stores book and TOC title strings NFC-composed so decomposed

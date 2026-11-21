@@ -22,8 +22,8 @@ const EpdFont* EpdFontFamily::getFont(const Style style) const {
   return regular;
 }
 
-void EpdFontFamily::getTextDimensions(const char* string, int* w, int* h, const Style style, int* inkMinY,
-                                      int* inkMaxY) const {
+const char* EpdFontFamily::getTextDimensions(const char* string, int* w, int* h, const Style style, int* inkMinY,
+                                             int* inkMaxY, const int widthLimit) const {
   int minX = 0, minY = 0, maxX = 0, maxY = 0;
   int boundsMinY = 0, boundsMaxY = 0;
   bool hasInk = false;
@@ -41,7 +41,7 @@ void EpdFontFamily::getTextDimensions(const char* string, int* w, int* h, const 
     *h = 0;
     if (inkMinY) *inkMinY = 0;
     if (inkMaxY) *inkMaxY = 0;
-    return;
+    return nullptr;
   }
 
   int lastBaseX = 0;
@@ -51,7 +51,7 @@ void EpdFontFamily::getTextDimensions(const char* string, int* w, int* h, const 
   int32_t prevAdvanceFP = 0;
   uint32_t cp;
   uint32_t prevCp = 0;
-  while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&string)))) {
+  while (maxX - minX <= widthLimit && (cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&string)))) {
     if (utf8IsVariationSelector(cp)) continue;
 
     const bool isCombining = utf8IsCombiningMark(cp);
@@ -191,6 +191,7 @@ void EpdFontFamily::getTextDimensions(const char* string, int* w, int* h, const 
   *h = maxY - minY;
   if (inkMinY) *inkMinY = boundsMinY;
   if (inkMaxY) *inkMaxY = boundsMaxY;
+  return *w > widthLimit ? string : nullptr;
 }
 
 const EpdFontData* EpdFontFamily::getData(const Style style) const { return getFont(style)->data; }

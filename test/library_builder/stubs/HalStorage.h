@@ -29,10 +29,12 @@ inline bool failDirectorySeek = false;
 inline std::string failDirectoryIterationPath;
 inline std::string failOpenPath;
 inline std::string failClosePath;
+inline std::string failSyncPath;
 inline std::string failWritePath;
 inline unsigned parses = 0;
 inline unsigned reads = 0;
 inline unsigned seeks = 0;
+inline unsigned flushes = 0;
 inline unsigned delays = 0;
 inline void (*onService)() = nullptr;
 inline std::map<std::string, unsigned> writesByPath;
@@ -62,10 +64,12 @@ inline void reset() {
   failDirectoryIterationPath.clear();
   failOpenPath.clear();
   failClosePath.clear();
+  failSyncPath.clear();
   failWritePath.clear();
   parses = 0;
   reads = 0;
   seeks = 0;
+  flushes = 0;
   delays = 0;
   onService = nullptr;
   writesByPath.clear();
@@ -77,6 +81,7 @@ inline void reset() {
 inline void resetIoCounters() {
   reads = 0;
   seeks = 0;
+  flushes = 0;
   delays = 0;
 }
 
@@ -203,7 +208,15 @@ class HalFile {
     return size;
   }
   size_t write(const void* data, const size_t size) { return write(static_cast<const uint8_t*>(data), size); }
-  bool sync() { return bool(node); }
+  bool sync() {
+    ++fake::flushes;
+    if (!fake::failSyncPath.empty() && path == fake::failSyncPath) {
+      fake::failSyncPath.clear();
+      fake::failureTriggered = true;
+      return false;
+    }
+    return bool(node);
+  }
 };
 
 class HalStorage {
@@ -214,6 +227,7 @@ class HalStorage {
   }
 
   bool exists(const char* path) const { return fake::files.count(path) != 0; }
+  bool ensureDirectoryExists(const char* path) { return mkdir(path); }
   bool mkdir(const char* path) {
     if (!exists(path)) fake::add(path, "");
     fake::files[path]->directory = true;

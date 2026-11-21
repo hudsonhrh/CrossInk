@@ -14,14 +14,15 @@ void testLog(Args&&...) {}
 unsigned errors = 0;
 struct Input {
   size_t index = 0;
-  void seek(size_t position) { index = position; }
+  bool seek(size_t position) { index = position; return true; }
 } spineIn;
-struct Entry {
+struct SpineEntry {
   std::string href;
 };
-Entry readSpineEntryFrom(Input& input) {
+bool readSpineEntryFrom(Input& input, size_t, SpineEntry& entry) {
   // Repeated paths span batches; reverse order exercises sorting.
-  return {std::to_string(101 - (input.index++ % 101))};
+  entry.href = std::to_string(101 - (input.index++ % 101));
+  return true;
 }
 namespace FsHelpers {
 std::string normalisePath(const std::string& path) { return path; }
@@ -60,8 +61,8 @@ bool runBatch(uint16_t spineCount, unsigned failAllocation = 0) {
   Arena metadataArena;
   metadataArena.failAllocation = failAllocation;
   ArenaVector<uint32_t> spineSizes(metadataArena);
-  bool lowMemoryFailure = false, filesClosed = false, useBatchSizes = false;
-  auto closeBuildFiles = [&] { filesClosed = true; };
+  bool lowMemoryFailure = false, useBatchSizes = false;
+  constexpr size_t spineFileSize = 0;
   ZipFile zip;
   constexpr uint16_t LARGE_SPINE_THRESHOLD = 300;
   // Generated directly from BookMetadataCache.cpp, including allocation/cleanup paths.
@@ -71,10 +72,10 @@ bool runBatch(uint16_t spineCount, unsigned failAllocation = 0) {
   };
   const bool success = run();
   if (failAllocation && spineCount >= LARGE_SPINE_THRESHOLD) {
-    assert(!success && lowMemoryFailure && filesClosed && zip.closed);
+    assert(!success && lowMemoryFailure && zip.closed);
     return false;
   }
-  assert(success && !lowMemoryFailure && !filesClosed && !zip.closed);
+  assert(success && !lowMemoryFailure && !zip.closed);
   if (spineCount < LARGE_SPINE_THRESHOLD) {
     assert(!useBatchSizes && zip.batchSizes.empty());
     return true;

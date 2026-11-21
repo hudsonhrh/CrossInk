@@ -4,6 +4,8 @@
 #include <ReaderRefreshScope.h>
 #include <SdCardFont.h>
 #include <TouchReaderPreviewModel.h>
+#include <XtchPageRenderer.h>
+#include <XtgPageRenderer.h>
 #include <gtest/gtest.h>
 
 #include <array>
@@ -131,6 +133,41 @@ TEST(EpubTextGrayscaleTest, CharacterSpacingMeasuresAndDrawsTheSameGlyphPosition
   }
 }
 
+TEST(EpubTextGrayscaleTest, WrappedTextOverflowAlwaysContainsTheFirstTooWideGlyph) {
+  RasterFont fixture(12);
+  // "fi" can narrow on substitution; truncating in the middle of a ligature
+  // must not make a rejected prefix look wider than a longer, valid one.
+  const EpdLigaturePair pairs[] = {{('f' << 16) | 'i', 'j'}};
+  fixture.data.ligaturePairs = pairs;
+  fixture.data.ligaturePairCount = 1;
+  fixture.glyphs['j' - 32].width = 3;
+  fixture.glyphs['j' - 32].advanceX = 48;
+  HalDisplay display(800, 480);
+  GfxRenderer renderer(display);
+  renderer.begin();
+  renderer.insertFont(1, EpdFontFamily(&fixture.font));
+  const char embeddedNul[] = {'\0', 'x', '\0'};
+  EXPECT_EQ(renderer.getTextOverflowPrefix(1, embeddedNul, 2, -1), 2u);
+  for (const std::string text : {"", "fi", " fifi fiii", "Á fi M", "אב fi سلام"}) {
+    for (const int spacing : {0, -5, 4}) {
+      for (int limit = 0; limit < 80; ++limit) {
+        const size_t end = renderer.getTextOverflowPrefix(1, text.c_str(), text.size(), limit, spacing);
+        const auto width = [&](const std::string& prefix) {
+          return renderer.getTextWidth(1, prefix.c_str(), EpdFontFamily::REGULAR, BidiUtils::BidiBaseDir::AUTO,
+                                       spacing);
+        };
+        ASSERT_EQ(end == 0, width(text) <= limit);
+        if (!end) continue;
+        ASSERT_LE(end, text.size());
+        for (size_t len = end; len <= text.size(); ++len) {
+          if (len < text.size() && (text[len] & 0xC0) == 0x80) continue;
+          ASSERT_GT(width(text.substr(0, len)), limit);
+        }
+      }
+    }
+  }
+}
+
 TEST(EpubTextGrayscaleTest, CharacterSpacingDecorationsFollowTextWidth) {
   fakeheap::reset(true);
   Storage.reset();
@@ -156,6 +193,246 @@ TEST(EpubTextGrayscaleTest, CharacterSpacingDecorationsFollowTextWidth) {
         const int lineY = decoration == EpdFontFamily::UNDERLINE ? wordY + 15 : wordY + 13 - glyphHeight / 2;
         renderer.drawLine(20, lineY, 20 + width, lineY, 3, true);
         EXPECT_EQ(display.bw, actual) << int(spacing) << ' ' << int(style);
+      }
+    }
+  }
+}
+
+TEST(EpubTextGrayscaleTest, AxisAlignedLinesMatchPixelReferenceAcrossClipsAndStrips) {
+  for (auto orientation : {GfxRenderer::Portrait, GfxRenderer::PortraitInverted, GfxRenderer::LandscapeClockwise,
+                           GfxRenderer::LandscapeCounterClockwise}) {
+    HalDisplay display(43, 33), referenceDisplay(43, 33);
+    GfxRenderer renderer(display), reference(referenceDisplay);
+    renderer.begin();
+    reference.begin();
+    renderer.setOrientation(orientation);
+    reference.setOrientation(orientation);
+    for (bool strip : {false, true}) {
+      std::vector<uint8_t> actualStrip(display.stride * 11, 0xA5), expectedStrip = actualStrip;
+      if (strip) {
+        renderer.beginStripTarget(actualStrip.data(), 8, 11);
+        reference.beginStripTarget(expectedStrip.data(), 8, 11);
+      }
+      for (bool clip : {false, true}) {
+        if (clip) {
+          renderer.beginTextClip(3, 6, 21, 16);
+          reference.beginTextClip(3, 6, 21, 16);
+        }
+        const int w = renderer.getScreenWidth(), h = renderer.getScreenHeight();
+        for (bool black : {false, true}) {
+          for (const auto& [x1, y1, x2, y2] : std::initializer_list<std::array<int, 4>>{{-2, 12, w + 2, 12},
+                                                                                        {15, h + 3, 15, -3},
+                                                                                        {17, 11, 17, 11},
+                                                                                        {7, 11, 8, 11},
+                                                                                        {11, 16, 2, 16},
+                                                                                        {3, 14, 3, 18},
+                                                                                        {20, -4, 20, -1},
+                                                                                        {w + 1, 10, w + 6, 10}}) {
+            renderer.drawLine(x1, y1, x2, y2, black);
+            for (int y = std::max(0, std::min(y1, y2)); y <= std::min(h - 1, std::max(y1, y2)); ++y)
+              for (int x = std::max(0, std::min(x1, x2)); x <= std::min(w - 1, std::max(x1, x2)); ++x)
+                reference.drawPixel(x, y, black);
+            ASSERT_EQ(display.bw, referenceDisplay.bw);
+            ASSERT_EQ(actualStrip, expectedStrip);
+          }
+        }
+        if (clip) {
+          renderer.endTextClip();
+          reference.endTextClip();
+        }
+      }
+      if (strip) {
+        renderer.endStripTarget();
+        reference.endStripTarget();
+      }
+    }
+  }
+}
+
+TEST(XtchPageRaster, NativeAndRotatedChunksMatchAllFourShades) {
+  constexpr int panelWidth = 40, panelHeight = 19;
+  HalDisplay actual(panelWidth, panelHeight), expected(panelWidth, panelHeight);
+  GfxRenderer renderer(actual), reference(expected);
+  renderer.begin();
+  reference.begin();
+  for (auto angle : {GfxRenderer::Portrait, GfxRenderer::PortraitInverted, GfxRenderer::LandscapeClockwise,
+                     GfxRenderer::LandscapeCounterClockwise}) {
+    renderer.setOrientation(angle);
+    reference.setOrientation(angle);
+    for (const auto [width, height] : {std::pair{panelHeight, panelWidth}, std::pair{23, 48}, std::pair{11, 7}, std::pair{3, 9}}) {
+      const size_t planeSize = width * ((height + 7) / 8);
+      std::vector<uint8_t> page(2 * planeSize);
+      for (size_t i = 0; i < page.size(); ++i) page[i] = static_cast<uint8_t>((i * 167 + 111) ^ (i >> 2));
+      const bool native = xtc::hasNativeXtchLayout(renderer, width, height);
+      ASSERT_EQ(native, angle == GfxRenderer::Portrait && width == panelHeight && height == panelWidth);
+      const bool packed = xtc::canWriteXtchColumns(renderer);
+      ASSERT_EQ(packed, angle == GfxRenderer::Portrait);
+      for (const size_t chunk : {1, 17, 1024}) {
+        std::vector<uint8_t> lsb(actual.bw.size()), msb(actual.bw.size());
+        for (auto pass : {xtc::XtchRenderPass::Base, xtc::XtchRenderPass::Lsb, xtc::XtchRenderPass::Msb}) {
+          SCOPED_TRACE(testing::Message() << angle << " " << width << "x" << height << " chunk=" << chunk);
+          renderer.clearScreen(pass == xtc::XtchRenderPass::Base ? 0xff : 0);
+          reference.clearScreen(pass == xtc::XtchRenderPass::Base ? 0xff : 0);
+          for (int x = 0; x < width; ++x) {
+            for (int y = 0; y < height; ++y) {
+              const size_t byte = (width - 1 - x) * ((height + 7) / 8) + y / 8;
+              ASSERT_LT(byte, planeSize);
+              const int mask = 0x80 >> (y % 8);
+              const int shade = (page[byte] & mask ? 2 : 0) + (page[planeSize + byte] & mask ? 1 : 0);
+              const bool white = pass == xtc::XtchRenderPass::Base  ? shade == 0
+                                 : pass == xtc::XtchRenderPass::Lsb ? shade == 1
+                                                                    : shade == 1 || shade == 2;
+              reference.drawPixel(x, y, !white);
+            }
+          }
+          for (size_t offset = 0; offset < page.size(); offset += chunk) {
+            ASSERT_TRUE(xtc::drawXtchChunk(renderer, page.data() + offset, std::min(chunk, page.size() - offset),
+                                           offset, width, height, pass, native));
+          }
+          ASSERT_EQ(expected.bw, actual.bw);
+          if (packed && pass == xtc::XtchRenderPass::Base) {
+            renderer.clearScreen(native ? 0x99 : 0xff);
+            for (size_t offset = 0; offset < page.size(); offset += chunk) {
+              ASSERT_TRUE(xtc::drawXtchChunk(renderer, page.data() + offset, std::min(chunk, page.size() - offset),
+                                             offset, width, height, pass, native, lsb.data(), msb.data()));
+            }
+            ASSERT_EQ(expected.bw, actual.bw);
+          } else if (packed) {
+            ASSERT_EQ(expected.bw, pass == xtc::XtchRenderPass::Lsb ? lsb : msb);
+          }
+          ASSERT_FALSE(xtc::drawXtchChunk(renderer, page.data(), 2, page.size() - 1, width, height, pass, native));
+          ASSERT_EQ(expected.bw, actual.bw);
+        }
+      }
+    }
+  }
+}
+
+TEST(XtchPageRaster, PartialStripWritesOnlyTheRequestedRows) {
+  constexpr int w = 19, h = 40;
+  HalDisplay display(h, w);
+  GfxRenderer renderer(display);
+  renderer.begin();
+  std::vector<uint8_t> page(2 * w * (h / 8));
+  for (size_t i = 0; i < page.size(); ++i) page[i] = static_cast<uint8_t>(31 * i + 7);
+  for (auto orientation : {GfxRenderer::Portrait, GfxRenderer::PortraitInverted, GfxRenderer::LandscapeClockwise,
+                           GfxRenderer::LandscapeCounterClockwise}) {
+    renderer.setOrientation(orientation);
+    for (auto pass : {xtc::XtchRenderPass::Base, xtc::XtchRenderPass::Lsb, xtc::XtchRenderPass::Msb}) {
+      const uint8_t clear = pass == xtc::XtchRenderPass::Base ? 0xff : 0;
+      renderer.clearScreen(clear);
+      const bool native = xtc::hasNativeXtchLayout(renderer, w, h);
+      ASSERT_TRUE(xtc::drawXtchChunk(renderer, page.data(), page.size(), 0, w, h, pass, native));
+      const auto expected = display.bw;
+      renderer.clearScreen(0xa7);
+      for (const auto [start, count] : {std::pair{0, 1}, std::pair{3, 7}, std::pair{w - 1, 1}}) {
+        const int bytes = display.stride * count;
+        std::vector<uint8_t> padded(bytes + 2, clear);
+        padded.front() = padded.back() = 0x53;
+        renderer.beginStripTarget(padded.data() + 1, start, count);
+        ASSERT_FALSE(xtc::hasNativeXtchLayout(renderer, w, h));
+        for (size_t off = 0; off < page.size(); off += 13) {
+          ASSERT_TRUE(xtc::drawXtchChunk(renderer, page.data() + off, std::min<size_t>(13, page.size() - off), off,
+                                         w, h, pass, false));
+        }
+        renderer.endStripTarget();
+        EXPECT_TRUE(std::equal(padded.begin() + 1, padded.end() - 1, expected.begin() + display.stride * start));
+        EXPECT_EQ(padded.front(), 0x53);
+        EXPECT_EQ(padded.back(), 0x53);
+      }
+      EXPECT_TRUE(std::all_of(display.bw.begin(), display.bw.end(), [](uint8_t value) { return value == 0xa7; }));
+    }
+  }
+}
+
+TEST(XtchPageRaster, OnlyIdenticalSourcePlanesCanSkipGrayDrive) {
+  HalDisplay display(32, 40);
+  GfxRenderer renderer(display);
+  renderer.begin();
+  constexpr size_t planeBytes = 32 * 40 / 8;
+  for (const bool prepareAll : {false, true}) {
+    for (const size_t differingByte : {size_t{0}, planeBytes - 1, planeBytes}) {
+      std::array<uint8_t, planeBytes * 2> page{};
+      for (size_t i = 0; i < planeBytes; ++i) page[i] = page[planeBytes + i] = static_cast<uint8_t>(i * 83);
+      if (differingByte < planeBytes) page[planeBytes + differingByte] ^= 1;
+      std::array<uint8_t, planeBytes> lsb{}, msb{};
+      bool hasGray = false;
+      for (size_t offset = 0; offset < page.size(); offset += 17) {
+        ASSERT_TRUE(xtc::drawXtchChunk(renderer, page.data() + offset, std::min<size_t>(17, page.size() - offset),
+                                       offset, 40, 32, xtc::XtchRenderPass::Base, true,
+                                       prepareAll ? lsb.data() : nullptr, prepareAll ? msb.data() : nullptr, &hasGray));
+      }
+      EXPECT_EQ(hasGray, differingByte < planeBytes);
+    }
+  }
+}
+
+TEST(XtchPageRaster, OnlyVisibleDifferencesRequireGrayOnPaddedAndClippedPages) {
+  constexpr int panelWidth = 37, panelHeight = 19;
+  HalDisplay display(panelWidth, panelHeight);
+  GfxRenderer renderer(display);
+  renderer.begin();
+  for (const auto [width, height] : {std::pair{11, 17}, std::pair{27, 44}}) {
+    const size_t columnBytes = (height + 7) / 8;
+    const size_t plane = width * columnBytes;
+    const int visibleHeight = std::min(height, panelWidth);
+    std::vector<uint8_t> page(2 * plane);
+    for (int x = 0; x < width; ++x) {
+      for (size_t bit = 0; bit < columnBytes * 8; ++bit) {
+        const size_t pos = columnBytes * (width - 1 - x) + bit / 8;
+        const uint8_t mask = 0x80 >> (bit % 8);
+        if ((x + bit) % 3 == 0) page[pos] |= mask;
+        const bool visible = x < panelHeight && bit < static_cast<size_t>(visibleHeight);
+        if (((page[pos] & mask) != 0) == visible) page[plane + pos] |= mask;
+      }
+    }
+    for (bool gray : {false, true}) {
+      // One visible bit on the last, partial byte exercises both sides of the mask.
+      const size_t pos = columnBytes * (width - 1) + (visibleHeight - 1) / 8;
+      if (gray) page[plane + pos] ^= 0x80 >> ((visibleHeight - 1) % 8);
+      for (bool staged : {false, true}) {
+        std::vector<uint8_t> lsb(display.bw.size()), msb(display.bw.size());
+        renderer.clearScreen();
+        bool detected = false;
+        for (size_t off = 0; off < page.size(); off += 7) {
+          ASSERT_TRUE(xtc::drawXtchChunk(renderer, page.data() + off, std::min<size_t>(7, page.size() - off),
+                                         off, width, height, xtc::XtchRenderPass::Base, false,
+                                         staged ? lsb.data() : nullptr, staged ? msb.data() : nullptr, &detected));
+        }
+        EXPECT_EQ(gray, detected);
+      }
+    }
+  }
+}
+
+TEST(XtgPageRaster, MatchesIndividualInkPixelsAcrossRotationsAndPaddedRows) {
+  constexpr std::array<uint8_t, 8> pattern{0xff, 0, 0, 0, 0x81, 0x7e, 0x55, 0xaa};
+  for (auto orientation : {GfxRenderer::Portrait, GfxRenderer::PortraitInverted, GfxRenderer::LandscapeClockwise,
+                           GfxRenderer::LandscapeCounterClockwise}) {
+    HalDisplay display(43, 33), referenceDisplay(43, 33);
+    GfxRenderer renderer(display), reference(referenceDisplay);
+    renderer.begin();
+    reference.begin();
+    renderer.setOrientation(orientation);
+    reference.setOrientation(orientation);
+    for (int width : {1, 7, 8, 9, 31, renderer.getScreenWidth(), 57}) {
+      for (int height : {7, renderer.getScreenHeight() + 3}) {
+        SCOPED_TRACE(testing::Message() << "orientation=" << orientation << " page=" << width << "x" << height);
+        const int stride = (width + 7) / 8;
+        std::vector<uint8_t> page(stride * height);
+        for (int y = 0; y < height; ++y) {
+          for (int byte = 0; byte < stride; ++byte) page[y * stride + byte] = pattern[(y + byte) % pattern.size()];
+        }
+        // Unpainted white source pixels, row padding and clipped tails must preserve the background.
+        renderer.clearScreen(0xa5);
+        reference.clearScreen(0xa5);
+        xtc::drawXtgPage(renderer, page.data(), width, height);
+        for (int y = 0; y < height; ++y) {
+          for (int x = 0; x < width; ++x) {
+            if (!(page[y * stride + x / 8] & (0x80 >> (x % 8)))) reference.drawPixel(x, y);
+          }
+        }
+        EXPECT_EQ(display.bw, referenceDisplay.bw);
       }
     }
   }
@@ -614,6 +891,82 @@ TEST(AbsoluteImageRaster, BitmapPlanesPreserveFourTonesAndWhiteMargins) {
   renderer.setRenderMode(GfxRenderer::BW);
   EXPECT_EQ(display.canceled, 1);
   file.close();
+}
+
+TEST(AbsoluteImageRaster, PackedBitmapRowsMatchScalarClippingAndAllGrayscalePlanes) {
+  fakeheap::reset(true);
+  constexpr int width = 21, height = 13;
+  for (int bpp : {1, 2}) {
+    const int colors = 1 << bpp;
+    const int offset = 54 + colors * 4;
+    const int stride = (width * bpp + 31) / 32 * 4;
+    auto data = std::make_shared<HostFileData>();
+    data->bytes.resize(offset + height * stride);
+    auto put16 = [&](int i, uint16_t v) { memcpy(data->bytes.data() + i, &v, 2); };
+    auto put32 = [&](int i, uint32_t v) { memcpy(data->bytes.data() + i, &v, 4); };
+    put16(0, 0x4d42);
+    put32(2, data->bytes.size());
+    put32(10, offset);
+    put32(14, 40);
+    put32(18, width);
+    put32(22, -height);
+    put16(26, 1);
+    put16(28, bpp);
+    for (int c = 0; c < colors; ++c) std::fill_n(data->bytes.begin() + 54 + 4 * c, 3, c * 255 / (colors - 1));
+    for (int i = 0; i < height * stride; ++i) data->bytes[offset + i] = static_cast<uint8_t>(31 + 73 * i);
+    HalFile file(data);
+    Bitmap bitmap(file);
+    ASSERT_EQ(bitmap.parseHeaders(), BmpReaderError::Ok);
+
+    for (int orientation = 0; orientation < 4; ++orientation) {
+      for (auto mode : {GfxRenderer::BW, GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
+        for (const bool absolute : {false, true}) {
+          for (const bool mask : {false, true}) {
+            for (const bool strip : {false, true}) {
+              for (const bool crop : {false, true}) {
+                HalDisplay display(17, 15), referenceDisplay(17, 15);
+                GfxRenderer renderer(display), reference(referenceDisplay);
+                renderer.begin();
+                reference.begin();
+                std::vector<uint8_t> band(display.stride * 5, 0xa5), referenceBand = band;
+                for (auto* g : {&renderer, &reference}) {
+                  g->setOrientation(static_cast<GfxRenderer::Orientation>(orientation));
+                  g->clearScreen(0xa5);
+                  if (absolute) ASSERT_TRUE(g->displayAbsoluteGrayscaleBase());
+                  g->setRenderMode(mode);
+                  g->beginTextClip(1, 1, 11, 11);
+                  if (strip) g->beginStripTarget(g == &renderer ? band.data() : referenceBand.data(), 3, 5);
+                }
+                ASSERT_EQ(bitmap.rewindToData(), BmpReaderError::Ok);
+                ASSERT_TRUE(renderer.drawBitmap(bitmap, -2, 3, width, height, crop ? 0.3f : 0.0f, 0, mask));
+                const int cropPixels = crop ? 3 : 0;
+                for (int y = 0; y < height; ++y) {
+                  for (int x = cropPixels; x < width - cropPixels; ++x) {
+                    const int bit = x * bpp;
+                    const int color =
+                        (data->bytes[offset + y * stride + bit / 8] >> (8 - bpp - (bit & 7))) & (colors - 1);
+                    const uint8_t level = color * 3 / (colors - 1);
+                    const auto pixel = mode == GfxRenderer::BW || mask || (bpp == 1 && !crop)
+                                           ? GrayPlanePixel{level < 3, true}
+                                           : grayPlanePixel(level, mode == GfxRenderer::GRAYSCALE_MSB, absolute);
+                    if (pixel.write) reference.drawPixel(x - cropPixels - 2, y + 3, pixel.black);
+                  }
+                }
+                EXPECT_EQ(display.bw, referenceDisplay.bw);
+                EXPECT_EQ(band, referenceBand);
+                for (auto* g : {&renderer, &reference}) {
+                  if (strip) g->endStripTarget();
+                  g->endTextClip();
+                  g->setRenderMode(GfxRenderer::BW);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    file.close();
+  }
 }
 
 TEST(RetainedGrayscaleOverlay, RotatesTheRegionAndRejectsInvalidBoundsWithoutPainting) {

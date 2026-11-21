@@ -156,6 +156,31 @@ TEST_F(ZipCentralDirectory, ReusedZipWrapsFromItsCursorAndReadsData) {
   zip.close();
 }
 
+TEST_F(ZipCentralDirectory, UniqueIdentityBatchChecksForLaterPhysicalDuplicatesAndPreservesTheCursor) {
+  const std::string name = entries.front().name;
+  const auto len = static_cast<uint16_t>(name.size());
+  const auto hash = ZipFile::fnvHash64(name.data(), len);
+  const ZipFile::EntryTarget targets[] = {{hash, len, 0, name.c_str()}, {hash, len, 1, name.c_str()}};
+  ZipFile::EntryIdentity matches[2]{};
+  EXPECT_EQ(ZipFile(path).fillEntryIdentities(targets, 2, matches, 2, true), 2);  // Repeated spine href is valid.
+  EXPECT_EQ(matches[0].uncompressedSize, matches[1].uncompressedSize);
+
+  entries.push_back({name, "second physical copy", 0, 0, 17});
+  Storage.put(path, buildZip(entries));
+  ZipFile zip(path);
+  ASSERT_TRUE(zip.open());
+  size_t length = 0;
+  ASSERT_TRUE(zip.getInflatedFileSize(name.c_str(), &length));
+  EXPECT_EQ(length, entries.front().data.size());
+  const auto cursor = zip.directoryCursorPosition();
+  ZipFile::EntryIdentity ambiguous[2]{};
+  EXPECT_LT(zip.fillEntryIdentities(targets, 2, ambiguous, 2, true), 0);
+  EXPECT_EQ(zip.directoryCursorPosition(), cursor);
+  ASSERT_TRUE(zip.getInflatedFileSize(name.c_str(), &length));
+  EXPECT_EQ(length, entries.back().data.size());
+  zip.close();
+}
+
 TEST_F(ZipCentralDirectory, LoadAllStatsMatchesIndividualLookups) {
   ZipFile zip(path);
   ASSERT_TRUE(zip.loadAllFileStatSlims());

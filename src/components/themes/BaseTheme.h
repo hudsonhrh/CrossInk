@@ -316,7 +316,9 @@ class BaseTheme {
   // With preserveBackdrop, leave the popup on the display but restore the backing
   // pixels for the next redraw. An empty rect means preservation failed and the
   // popup was skipped. Caller must own RenderLock.
-  virtual Rect drawPopup(const GfxRenderer& renderer, const char* message, bool preserveBackdrop = false) const;
+  // Supply initialProgress to present the label and its first progress bar together.
+  virtual Rect drawPopup(const GfxRenderer& renderer, const char* message, bool preserveBackdrop = false,
+                         int initialProgress = -1) const;
   virtual void drawOptionPopup(const GfxRenderer& renderer, const char* title, OptionLabels options, int selectedIndex,
                                bool showConfirmationFooter = false, const char* cancelLabel = nullptr,
                                const char* saveLabel = nullptr, bool saveFocused = false, int primaryOptionIndex = -1,

@@ -67,7 +67,7 @@ class Bitmap {
 
   explicit Bitmap(HalFile& file, bool dithering = false, ImageToneProfile toneProfile = ImageToneProfile::Legacy)
       : file(file), dithering(dithering), toneProfile(toneProfile) {}
-  ~Bitmap();
+  ~Bitmap() = default;
   BmpReaderError parseHeaders();
   BmpReaderError readNextRow(uint8_t* data, uint8_t* rowBuffer) const;
   BmpReaderError rewindToData() const;
@@ -90,7 +90,7 @@ class Bitmap {
   static uint16_t readLE16(HalFile& f);
   static uint32_t readLE32(HalFile& f);
   uint8_t pixelLuminance(const uint8_t* row, int x) const;
-  BmpReaderError readAveragedRow(uint8_t* rowBuffer) const;
+  BmpReaderError readAveragedRow(uint8_t* data, uint8_t* rowBuffer) const;
 
   HalFile& file;
   bool dithering = false;
@@ -102,6 +102,7 @@ class Bitmap {
   uint16_t bpp = 0;
   uint32_t colorsUsed = 0;
   bool nativePalette = false;  // true if all palette entries map to native gray levels
+  bool packedNative2Bit = false;
   int rowBytes = 0;
   int outputWidth = 0;
   int outputHeight = 0;
@@ -109,11 +110,10 @@ class Bitmap {
   uint8_t paletteLum[256] = {};
 
   // Dithering state (mutable for const methods)
-  mutable int16_t* errorCurRow = nullptr;
-  mutable int16_t* errorNextRow = nullptr;
+  mutable bool needSequentialSeek = false;
   mutable int sourceRowsRead = 0;
   mutable int outputRowsRead = 0;
 
-  mutable AtkinsonDitherer* atkinsonDitherer = nullptr;
-  mutable FloydSteinbergDitherer* fsDitherer = nullptr;
+  std::unique_ptr<AtkinsonDitherer> atkinsonDitherer;
+  std::unique_ptr<FloydSteinbergDitherer> fsDitherer;
 };

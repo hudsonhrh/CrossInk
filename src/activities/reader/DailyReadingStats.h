@@ -42,7 +42,8 @@ struct Summary {
   uint32_t todaySeconds = 0;
   uint32_t sevenDayAverageSeconds = 0;
 };
-Summary summarize(uint32_t today);
+// A successfully loaded window ends on today. Read only any uncovered days from storage.
+Summary summarize(uint32_t today, const uint32_t* windowSeconds = nullptr, size_t windowDays = 0);
 
 // Clock capture is paired with the existing page timer, including its pauses.
 // At most nine one-second dates can precede the existing 10-second session floor.

@@ -16,7 +16,6 @@
 #include "XtcReaderActivity.h"
 #include "activities/util/BmpViewerActivity.h"
 #include "activities/util/FullScreenMessageActivity.h"
-#include "components/UITheme.h"
 
 bool ReaderActivity::isXtcFile(const std::string& path) { return FsHelpers::hasXtcExtension(path); }
 
@@ -194,7 +193,6 @@ void ReaderActivity::onEnter() {
   if (!keepWakeFrame) openingFeedback.start();
 
   if (isImagePreviewFile(initialBookPath)) {
-    GUI.drawPopup(renderer, tr(STR_LOADING));
     onGoToBmpViewer(initialBookPath);
     return;
   }

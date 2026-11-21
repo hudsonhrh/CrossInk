@@ -131,6 +131,8 @@ class ZipFile {
   bool close();
   bool loadAllFileStatSlims();
   bool getInflatedFileSize(const char* filename, size_t* size);
+  // Position after the most recent matching entry while the ZIP is held open.
+  uint32_t directoryCursorPosition() const { return lastCentralDirPos; }
   // Batch lookup: scan ZIP central dir once and fill sizes for matching targets.
   // targets must be sorted by (hash, len). sizes[target.index] receives uncompressedSize.
   // Returns number of targets matched.
@@ -138,8 +140,10 @@ class ZipFile {
   // Batch lookup for duplicate detection. Targets must be sorted by (hash,
   // len); identities[target.index] receives the ZIP entry's CRC and sizes.
   // Returns matches, or -1 on open/header/directory read failure.
+  // With requireUniqueNames, pass cleared identities. The scan also returns -1
+  // if a targeted name occurs twice, leaving cursor-based selection to the caller.
   int fillEntryIdentities(const EntryTarget* targets, size_t targetCount, EntryIdentity* identities,
-                          size_t identityCount);
+                          size_t identityCount, bool requireUniqueNames = false);
   // Due to the memory required to run each of these, it is recommended to not preopen the zip file for multiple
   // These functions will open and close the zip as needed
   uint8_t* readFileToMemory(const char* filename, size_t* size = nullptr, bool trailingNullByte = false);
